@@ -15,7 +15,7 @@ setup(
     zip_safe=True,
     maintainer='final-project',
     maintainer_email='karamahati@gmail.com',
-    description='TODO: Package description',
+    description='ROS2 package for RGB camera image viewing and processing',
     license='Apache-2.0',
     tests_require=['pytest'],
     entry_points={

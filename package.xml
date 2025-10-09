@@ -3,7 +3,7 @@
 <package format="3">
   <name>vision</name>
   <version>0.0.0</version>
-  <description>TODO: Package description</description>
+  <description>ROS2 package for RGB camera image viewing and processing</description>
   <maintainer email="karamahati@gmail.com">final-project</maintainer>
   <license>Apache-2.0</license>
 
