@@ -21,6 +21,7 @@ setup(
     entry_points={
         'console_scripts': [
             'show_rgb_image = vision.show_rgb_image_node:main',
+            'show_depth_image = vision.show_depth_image_node:main',
         ],
     },
 )
