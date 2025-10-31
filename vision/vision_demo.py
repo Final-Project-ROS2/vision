@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-DINO Vision Pipeline Demo
+SAM Vision Pipeline Demo
 Demonstrates the complete 4-stage vision pipeline with test data
 """
 
@@ -16,7 +16,7 @@ import json
 
 class VisionPipelineDemo(Node):
     """
-    Demo node for the DINO vision pipeline
+    Demo node for the SAM vision pipeline
     Tests the pipeline with sample images and displays results
     """
     
@@ -32,7 +32,7 @@ class VisionPipelineDemo(Node):
         self.process_client = self.create_client(Trigger, '/vision/process_scene')
         self.reset_client = self.create_client(Trigger, '/vision/reset_pipeline')
         
-        self.get_logger().info("🎬 DINO Vision Pipeline Demo Started!")
+        self.get_logger().info("🎬 SAM Vision Pipeline Demo Started!")
         self.get_logger().info(f"📁 Demo images path: {self.demo_images_path}")
         self.get_logger().info(f"📁 Results will be saved to: {self.output_path}")
         
@@ -57,7 +57,7 @@ class VisionPipelineDemo(Node):
     def run_demo(self):
         """Run the complete demo sequence"""
         self.get_logger().info("\n" + "="*60)
-        self.get_logger().info("🚀 Starting DINO Vision Pipeline Demo")
+        self.get_logger().info("🚀 Starting SAM Vision Pipeline Demo")
         self.get_logger().info("="*60)
         
         # Demo sequence
@@ -257,7 +257,7 @@ class VisionPipelineDemo(Node):
         """Show final demo summary"""
         summary = f"""
         
-🎯 DINO Vision Pipeline Demo Summary
+🎯 SAM Vision Pipeline Demo Summary
 {'='*50}
 
 ✅ Completed Demonstrations:
@@ -305,7 +305,7 @@ For more information, see README.md
                 "demo_duration": "60-120 seconds"
             },
             "next_steps": [
-                "Install full DINO pipeline for production use",
+                "Install full SAM pipeline for production use",
                 "Configure camera hardware",
                 "Integrate with robot planning system",
                 "Customize for specific application domain"
