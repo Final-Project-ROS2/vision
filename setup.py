@@ -53,8 +53,7 @@ setup(
     entry_points={
         'console_scripts': [
             'show_rgb_image = vision.show_rgb_image_node:main',
-            'sam_vision_pipeline = vision.dino_vision_pipeline_node:main',
-            'vision_demo = vision.vision_demo:main',
+            'show_depth_image = vision.show_depth_image_node:main',
         ],
     },
 )

@@ -1,9 +1,9 @@
-#!/usr/bin/env python3
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image
 from std_srvs.srv import Trigger
 from cv_bridge import CvBridge
+import numpy as np
 import cv2
 
 
@@ -29,6 +29,8 @@ class RGBImageViewer(Node):
             self.show_image_callback
         )
 
+        numpy_version = np.__version__
+        self.get_logger().info(f"Numpy version: {numpy_version}")
         self.get_logger().info("RGBImageViewer started. Call /show_rgb_image to display the latest RGB image.")
 
     def image_callback(self, msg):
