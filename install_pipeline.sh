@@ -221,4 +221,4 @@ else
     exit 1
 fi
 
-echo "🎯 Ready to run DINO Vision Pipeline!"
+echo "🎯 Ready to run SAM Vision Pipeline!"
