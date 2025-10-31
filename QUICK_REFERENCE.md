@@ -1,4 +1,4 @@
-# ROS2 DINO Vision Pipeline - Quick Reference
+# ROS2 SAM Vision Pipeline - Quick Reference
 
 ## 🚀 Installation & Setup
 
