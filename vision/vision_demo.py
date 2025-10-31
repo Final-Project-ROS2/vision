@@ -32,7 +32,7 @@ class VisionPipelineDemo(Node):
         self.process_client = self.create_client(Trigger, '/vision/process_scene')
         self.reset_client = self.create_client(Trigger, '/vision/reset_pipeline')
         
-        self.get_logger().info("🎬 DINO Vision Pipeline Demo Started!")
+        self.get_logger().info("🎬 SAM Vision Pipeline Demo Started!")
         self.get_logger().info(f"📁 Demo images path: {self.demo_images_path}")
         self.get_logger().info(f"📁 Results will be saved to: {self.output_path}")
         
