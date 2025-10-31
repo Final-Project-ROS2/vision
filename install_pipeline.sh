@@ -156,16 +156,16 @@ echo "source /opt/ros/humble/setup.bash" >> ~/.bashrc
 echo "source $WORKSPACE_DIR/install/setup.bash" >> ~/.bashrc
 
 # Create desktop launcher (optional)
-DESKTOP_FILE="$HOME/Desktop/DINO_Vision_Pipeline.desktop"
+DESKTOP_FILE="$HOME/Desktop/SAM_Vision_Pipeline.desktop"
 if [[ -d "$HOME/Desktop" ]]; then
     echo "🖥️ Creating desktop launcher..."
     cat > "$DESKTOP_FILE" << EOF
 [Desktop Entry]
 Version=1.0
 Type=Application
-Name=DINO Vision Pipeline
-Comment=Launch ROS2 DINO Vision Pipeline
-Exec=gnome-terminal -- bash -c "source /opt/ros/humble/setup.bash && source $WORKSPACE_DIR/install/setup.bash && ros2 launch vision dino_pipeline.launch.py; exec bash"
+Name=SAM Vision Pipeline
+Comment=Launch ROS2 SAM Vision Pipeline
+Exec=gnome-terminal -- bash -c "source /opt/ros/humble/setup.bash && source $WORKSPACE_DIR/install/setup.bash && ros2 launch vision sam_pipeline.launch.py; exec bash"
 Icon=camera-web
 Terminal=false
 Categories=Development;Science;
