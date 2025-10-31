@@ -305,7 +305,7 @@ For more information, see README.md
                 "demo_duration": "60-120 seconds"
             },
             "next_steps": [
-                "Install full DINO pipeline for production use",
+                "Install full SAM pipeline for production use",
                 "Configure camera hardware",
                 "Integrate with robot planning system",
                 "Customize for specific application domain"
