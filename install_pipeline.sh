@@ -1,11 +1,11 @@
 #!/bin/bash
 
-# ROS2 DINO Vision Pipeline Installation Script
+# ROS2 SAM Vision Pipeline Installation Script
 # Automated setup for Ubuntu 22.04 + ROS2 Humble
 
 set -e  # Exit on any error
 
-echo "🚀 ROS2 DINO Vision Pipeline Installation"
+echo "🚀 ROS2 SAM Vision Pipeline Installation"
 echo "=========================================="
 
 # Check if running on Ubuntu
