@@ -257,7 +257,7 @@ class VisionPipelineDemo(Node):
         """Show final demo summary"""
         summary = f"""
         
-🎯 DINO Vision Pipeline Demo Summary
+🎯 SAM Vision Pipeline Demo Summary
 {'='*50}
 
 ✅ Completed Demonstrations:
