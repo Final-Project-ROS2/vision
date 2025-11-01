@@ -2,16 +2,53 @@
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
   <name>vision</name>
-  <version>0.0.0</version>
-  <description>TODO: Package description</description>
+  <version>1.0.0</version>
+  <description>ROS2 SAM Vision Pipeline - 4-stage robotic vision system with SAM (Meta), CLIP, GraspNet, and Scene Understanding</description>
   <maintainer email="karamahati@gmail.com">final-project</maintainer>
   <license>Apache-2.0</license>
 
+  <!-- Message generation -->
+  <build_depend>rosidl_default_generators</build_depend>
+  <exec_depend>rosidl_default_runtime</exec_depend>
+  <member_of_group>rosidl_interface_packages</member_of_group>
+  
+  <!-- Core ROS2 dependencies -->
   <depend>rclpy</depend>
   <depend>sensor_msgs</depend>
+  <depend>geometry_msgs</depend>
   <depend>std_srvs</depend>
+  <depend>std_msgs</depend>
+  <depend>visualization_msgs</depend>
+  <depend>tf2_ros</depend>
+  <depend>tf2_geometry_msgs</depend>
+  <depend>builtin_interfaces</depend>
+  
+  <!-- Computer Vision dependencies -->
   <depend>cv_bridge</depend>
-  <depend>opencv-python</depend>
+  <depend>image_transport</depend>
+  <depend>image_geometry</depend>
+  
+  <!-- Simulation and visualization -->
+  <depend>gazebo_ros</depend>
+  <depend>gazebo_plugins</depend>
+  <depend>robot_state_publisher</depend>
+  <depend>joint_state_publisher</depend>
+  <depend>rviz2</depend>
+  <depend>image_view</depend>
+  
+  <!-- Camera interfaces -->
+  <depend>usb_cam</depend>
+  <depend>v4l2_camera</depend>
+  
+  <!-- Python dependencies (system level) -->
+  <exec_depend>python3-opencv</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
+  <exec_depend>python3-matplotlib</exec_depend>
+  <exec_depend>python3-scipy</exec_depend>
+  <exec_depend>python3-sklearn</exec_depend>
+  <exec_depend>python3-pandas</exec_depend>
+  <exec_depend>python3-pil</exec_depend>
+  <exec_depend>python3-yaml</exec_depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>
