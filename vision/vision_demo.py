@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-DINO Vision Pipeline Demo
+SAM Vision Pipeline Demo
 Demonstrates the complete 4-stage vision pipeline with test data
 """
 
@@ -16,7 +16,7 @@ import json
 
 class VisionPipelineDemo(Node):
     """
-    Demo node for the DINO vision pipeline
+    Demo node for the SAM vision pipeline
     Tests the pipeline with sample images and displays results
     """
     
@@ -57,7 +57,7 @@ class VisionPipelineDemo(Node):
     def run_demo(self):
         """Run the complete demo sequence"""
         self.get_logger().info("\n" + "="*60)
-        self.get_logger().info("🚀 Starting DINO Vision Pipeline Demo")
+        self.get_logger().info("🚀 Starting SAM Vision Pipeline Demo")
         self.get_logger().info("="*60)
         
         # Demo sequence
