@@ -2,6 +2,9 @@ from setuptools import find_packages, setup
 import os
 from glob import glob
 
+import os
+from glob import glob
+
 package_name = 'vision'
 
 setup(
@@ -20,7 +23,7 @@ setup(
             glob('config/*.rviz') + glob('config/*.yaml') + glob('config/*.json')),
         # Include message files
         (os.path.join('share', package_name, 'msg'), 
-            glob('msg/*.msg')),
+            glob('msg/*.msg')), 
         # Include DINO pipeline components
         (os.path.join('share', package_name, 'Final-proj'), 
             glob('Final-proj/**/*.py', recursive=True)),
