@@ -80,6 +80,11 @@ class ROS2SAMVisionPipeline(Node):
     
     Services:
         - /vision/process_scene (Trigger full pipeline)
+        - /vision/detect_objects (Run object detection only)
+        - /vision/classify_objects (Run semantic classification)
+        - /vision/generate_grasps (Generate 6D grasp poses)
+        - /vision/get_positions (Get 3D object positions)
+        - /vision/build_scene_graph (Build scene graph with relations)
         - /vision/reset_pipeline (Reset internal state)
     """
     
@@ -94,6 +99,14 @@ class ROS2SAMVisionPipeline(Node):
         self.latest_depth = None
         self.camera_info = None
         self.pipeline_ready = False
+        
+        # Cached pipeline results for individual service calls
+        self.cached_detections = None
+        self.cached_classifications = None
+        self.cached_grasps = None
+        self.cached_positions = None
+        self.cached_scene_graph = None
+        self.last_processed_time = None
         
         # Output directory for saving results
         self.output_base = Path.home() / "ros2_vision_outputs"
@@ -205,19 +218,52 @@ class ROS2SAMVisionPipeline(Node):
     
     def _setup_services(self):
         """Set up ROS2 services"""
+        # Main pipeline service
         self.process_service = self.create_service(
             Trigger,
             '/vision/process_scene',
             self.process_scene_callback
         )
         
+        # Individual component services
+        self.detection_service = self.create_service(
+            Trigger,
+            '/vision/detect_objects',
+            self.detect_objects_callback
+        )
+        
+        self.classification_service = self.create_service(
+            Trigger,
+            '/vision/classify_objects',
+            self.classify_objects_callback
+        )
+        
+        self.grasp_service = self.create_service(
+            Trigger,
+            '/vision/generate_grasps',
+            self.generate_grasps_callback
+        )
+        
+        self.position_service = self.create_service(
+            Trigger,
+            '/vision/get_positions',
+            self.get_positions_callback
+        )
+        
+        self.scene_graph_service = self.create_service(
+            Trigger,
+            '/vision/build_scene_graph',
+            self.build_scene_graph_callback
+        )
+        
+        # Utility services
         self.reset_service = self.create_service(
             Trigger,
             '/vision/reset_pipeline',
             self.reset_pipeline_callback
         )
         
-        self.get_logger().info("🔧 Services initialized")
+        self.get_logger().info("Services initialized: process_scene, detect_objects, classify_objects, generate_grasps, get_positions, build_scene_graph, reset_pipeline")
     
     def rgb_callback(self, msg: Image):
         """Handle RGB image messages"""
@@ -271,18 +317,253 @@ class ROS2SAMVisionPipeline(Node):
             self.latest_depth = None
             self.camera_info = None
             
+            # Clear cached results
+            self.cached_detections = None
+            self.cached_classifications = None
+            self.cached_grasps = None
+            self.cached_positions = None
+            self.cached_scene_graph = None
+            self.last_processed_time = None
+            
             # Reinitialize pipeline if needed
             if not self.pipeline_ready and SAM_AVAILABLE:
                 self._init_sam_pipeline()
             
             response.success = True
             response.message = "Pipeline reset successfully"
-            self.get_logger().info("🔄 Pipeline state reset")
+            self.get_logger().info("Pipeline state reset")
             
         except Exception as e:
             response.success = False
             response.message = f"Error resetting pipeline: {e}"
             self.get_logger().error(f"Reset error: {e}")
+        
+        return response
+    
+    def detect_objects_callback(self, request, response):
+        """Service callback for object detection only"""
+        try:
+            if self.latest_rgb is None:
+                response.success = False
+                response.message = "No RGB image available"
+                return response
+            
+            if not self.pipeline_ready:
+                response.success = False
+                response.message = "Pipeline not ready"
+                return response
+            
+            self.get_logger().info("Running object detection...")
+            
+            # Run detection stage
+            if SAM_AVAILABLE and self.sam_pipeline is not None:
+                from datetime import datetime
+                detections, masks = self.sam_pipeline._run_sam_detection(self.latest_rgb)
+                self.cached_detections = {"detections": detections, "masks": masks, "timestamp": datetime.now()}
+                
+                response.success = True
+                response.message = f"Detected {len(detections)} objects"
+                self.get_logger().info(f"Detection complete: {len(detections)} objects found")
+            else:
+                response.success = False
+                response.message = "SAM pipeline not available"
+            
+        except Exception as e:
+            response.success = False
+            response.message = f"Detection error: {e}"
+            self.get_logger().error(f"Detection error: {e}")
+        
+        return response
+    
+    def classify_objects_callback(self, request, response):
+        """Service callback for object classification"""
+        try:
+            if self.cached_detections is None:
+                response.success = False
+                response.message = "No detections available. Run /vision/detect_objects first"
+                return response
+            
+            if not self.pipeline_ready:
+                response.success = False
+                response.message = "Pipeline not ready"
+                return response
+            
+            self.get_logger().info("Running object classification...")
+            
+            # Run classification stage
+            if SAM_AVAILABLE and self.sam_pipeline is not None:
+                from datetime import datetime
+                detections = self.cached_detections["detections"]
+                masks = self.cached_detections["masks"]
+                
+                semantic_objects = self.sam_pipeline._run_clip_tagging(
+                    self.latest_rgb, detections, masks
+                )
+                self.cached_classifications = {"objects": semantic_objects, "timestamp": datetime.now()}
+                
+                response.success = True
+                response.message = f"Classified {len(semantic_objects)} objects"
+                self.get_logger().info(f"Classification complete: {len(semantic_objects)} objects")
+            else:
+                response.success = False
+                response.message = "SAM pipeline not available"
+            
+        except Exception as e:
+            response.success = False
+            response.message = f"Classification error: {e}"
+            self.get_logger().error(f"Classification error: {e}")
+        
+        return response
+    
+    def generate_grasps_callback(self, request, response):
+        """Service callback for grasp pose generation"""
+        try:
+            if self.cached_classifications is None:
+                response.success = False
+                response.message = "No classifications available. Run /vision/classify_objects first"
+                return response
+            
+            if self.latest_depth is None:
+                response.success = False
+                response.message = "No depth data available"
+                return response
+            
+            if not self.pipeline_ready:
+                response.success = False
+                response.message = "Pipeline not ready"
+                return response
+            
+            self.get_logger().info("Generating grasp poses...")
+            
+            # Run grasp generation stage
+            if SAM_AVAILABLE and self.sam_pipeline is not None:
+                from datetime import datetime
+                semantic_objects = self.cached_classifications["objects"]
+                
+                grasps = self.sam_pipeline._run_graspnet_prediction(
+                    self.latest_rgb, self.latest_depth, semantic_objects
+                )
+                self.cached_grasps = {"grasps": grasps, "timestamp": datetime.now()}
+                
+                # Publish grasp poses
+                for grasp in grasps:
+                    grasp_msg = PoseStamped()
+                    grasp_msg.header.stamp = self.get_clock().now().to_msg()
+                    grasp_msg.header.frame_id = "camera_link"
+                    
+                    pos = grasp["pose"]["position"]
+                    ori = grasp["pose"]["orientation"]
+                    
+                    grasp_msg.pose.position = Point(x=float(pos[0]), y=float(pos[1]), z=float(pos[2]))
+                    grasp_msg.pose.orientation = Quaternion(x=float(ori[0]), y=float(ori[1]), z=float(ori[2]), w=float(ori[3]))
+                    
+                    self.grasp_pub.publish(grasp_msg)
+                
+                response.success = True
+                response.message = f"Generated {len(grasps)} grasp poses"
+                self.get_logger().info(f"Grasp generation complete: {len(grasps)} poses")
+            else:
+                response.success = False
+                response.message = "SAM pipeline not available"
+            
+        except Exception as e:
+            response.success = False
+            response.message = f"Grasp generation error: {e}"
+            self.get_logger().error(f"Grasp generation error: {e}")
+        
+        return response
+    
+    def get_positions_callback(self, request, response):
+        """Service callback to get object positions"""
+        try:
+            if self.cached_classifications is None:
+                response.success = False
+                response.message = "No classifications available. Run /vision/classify_objects first"
+                return response
+            
+            self.get_logger().info("Extracting object positions...")
+            
+            # Extract positions from classified objects
+            semantic_objects = self.cached_classifications["objects"]
+            positions = []
+            
+            for obj in semantic_objects:
+                bbox = obj.get("bbox", [0, 0, 0, 0])
+                center = obj.get("center", [(bbox[0] + bbox[2])//2, (bbox[1] + bbox[3])//2])
+                
+                # Get depth if available
+                depth_val = 0.5  # Default
+                if self.latest_depth is not None and len(center) == 2:
+                    y, x = int(center[1]), int(center[0])
+                    if 0 <= y < self.latest_depth.shape[0] and 0 <= x < self.latest_depth.shape[1]:
+                        depth_val = float(self.latest_depth[y, x]) / 1000.0  # Convert to meters
+                
+                position = {
+                    "object_id": obj.get("id", "unknown"),
+                    "class": obj.get("class", "object"),
+                    "position": {
+                        "x": float(center[0]) / 1000.0,
+                        "y": float(center[1]) / 1000.0,
+                        "z": depth_val
+                    },
+                    "bbox": bbox,
+                    "confidence": obj.get("confidence", 0.0)
+                }
+                positions.append(position)
+            
+            from datetime import datetime
+            self.cached_positions = {"positions": positions, "timestamp": datetime.now()}
+            
+            response.success = True
+            response.message = f"Retrieved {len(positions)} object positions"
+            self.get_logger().info(f"Position extraction complete: {len(positions)} positions")
+            
+        except Exception as e:
+            response.success = False
+            response.message = f"Position extraction error: {e}"
+            self.get_logger().error(f"Position extraction error: {e}")
+        
+        return response
+    
+    def build_scene_graph_callback(self, request, response):
+        """Service callback to build scene graph"""
+        try:
+            if self.cached_classifications is None:
+                response.success = False
+                response.message = "No classifications available. Run /vision/classify_objects first"
+                return response
+            
+            if self.cached_grasps is None:
+                # Try to generate grasps if not available
+                if self.latest_depth is not None:
+                    grasp_req = Trigger.Request()
+                    grasp_resp = Trigger.Response()
+                    self.generate_grasps_callback(grasp_req, grasp_resp)
+                else:
+                    self.cached_grasps = {"grasps": [], "timestamp": None}
+            
+            self.get_logger().info("Building scene graph...")
+            
+            # Build scene graph
+            if SAM_AVAILABLE and self.sam_pipeline is not None:
+                from datetime import datetime
+                semantic_objects = self.cached_classifications["objects"]
+                grasps = self.cached_grasps["grasps"]
+                
+                scene_graph = self.sam_pipeline._build_scene_graph(semantic_objects, grasps)
+                self.cached_scene_graph = {"scene_graph": scene_graph, "timestamp": datetime.now()}
+                
+                response.success = True
+                response.message = f"Scene graph built with {len(scene_graph.get('objects', []))} objects and {len(scene_graph.get('relations', []))} relations"
+                self.get_logger().info("Scene graph construction complete")
+            else:
+                response.success = False
+                response.message = "SAM pipeline not available"
+            
+        except Exception as e:
+            response.success = False
+            response.message = f"Scene graph error: {e}"
+            self.get_logger().error(f"Scene graph error: {e}")
         
         return response
     

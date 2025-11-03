@@ -57,6 +57,12 @@ setup(
         'console_scripts': [
             'show_rgb_image = vision.show_rgb_image_node:main',
             'show_depth_image = vision.show_depth_image_node:main',
+            'camera_service = vision.camera_service_node:main',
+            'sam_vision_pipeline = vision.sam_vision_pipeline_node:main',
+            'vision_demo = vision.vision_demo:main',
+            'test_services = scripts.test_services:main',
+            'test_pipeline_images = scripts.test_pipeline_images:main',
+            'integration_test = scripts.integration_test:main',
         ],
     },
 )
