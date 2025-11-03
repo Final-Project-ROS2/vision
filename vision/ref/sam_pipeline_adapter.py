@@ -545,4 +545,4 @@ class SAMPipelineAdapter:
         with open(output_path / "sam_pipeline_results.json", 'w') as f:
             json.dump(json_results, f, indent=2)
         
-        logger.info(f"📁 Debug outputs saved to {output_path}")
+        logger.info(f" Debug outputs saved to {output_path}")

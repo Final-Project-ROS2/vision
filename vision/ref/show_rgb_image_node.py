@@ -7,6 +7,13 @@ import numpy as np
 import cv2
 
 
+"""
+Node to show RGB images from the topic
+/camera/image_raw
+
+"""
+
+
 class RGBImageViewer(Node):
     def __init__(self):
         super().__init__('rgb_image_viewer')

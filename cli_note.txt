@@ -1,0 +1,39 @@
+# Build the package first
+cd d:\vision
+colcon build --packages-select vision
+
+# Source the workspace
+source install/setup.bash  # Linux
+# or
+.\install\setup.ps1  # Windows PowerShell
+
+# Launch everything!
+ros2 launch vision sam_gazebo_complete.launch.py
+
+
+
+-------------------------------------------------------------------------
+# Custom configurations
+ros2 launch vision sam_gazebo_complete.launch.py \
+    auto_process:=true \
+    processing_rate:=2.0 \
+    debug_visualization:=true \
+    gui:=true
+
+# Headless mode (no GUI)
+ros2 launch vision sam_gazebo_complete.launch.py gui:=false headless:=true
+
+
+-------------------------------------------------------------------------
+
+# In another terminal - check topics
+ros2 topic list
+
+# View the debug image with detected objects
+ros2 run rqt_image_view rqt_image_view /vision/debug_image
+
+# Manually trigger processing
+ros2 service call /vision/process_scene std_srvs/srv/Trigger
+
+# Check grasp poses
+ros2 topic echo /vision/grasp_poses --once

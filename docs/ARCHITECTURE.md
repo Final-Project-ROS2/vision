@@ -6,26 +6,26 @@ The vision system consists of two separate ROS2 nodes that work together:
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                     VISION SYSTEM                            │
+│                     VISION SYSTEM                           │
 ├─────────────────────────────────────────────────────────────┤
-│                                                              │
-│  ┌──────────────────────┐      ┌──────────────────────┐    │
-│  │  Camera Service      │      │  SAM Vision Pipeline │    │
-│  │  Node                │─────▶│  Node                │    │
-│  └──────────────────────┘      └──────────────────────┘    │
+│                                                             │
+│  ┌──────────────────────┐      ┌──────────────────────┐     │
+│  │  Camera Service      │      │  SAM Vision Pipeline │     │
+│  │  Node                │─────▶│  Node               │     │
+│  └──────────────────────┘      └──────────────────────┘     │
 │           │                              │                  │
 │           │ Opens Camera                 │ Processes Images │
 │           │ via CV Bridge                │ with AI Models   │
 │           │                              │                  │
 │           ▼                              ▼                  │
-│  ┌──────────────────────┐      ┌──────────────────────┐    │
-│  │  /camera/image_raw   │      │  Vision Services     │    │
-│  │  /camera/depth       │      │  - detect_objects    │    │
-│  │  /camera/info        │      │  - classify_objects  │    │
-│  └──────────────────────┘      │  - get_positions     │    │
-│                                 │  - generate_grasps   │    │
-│                                 │  - build_scene_graph │    │
-│                                 └──────────────────────┘    │
+│  ┌──────────────────────┐      ┌──────────────────────┐     │
+│  │  /camera/image_raw   │      │  Vision Services     │     │
+│  │  /camera/depth       │      │  - detect_objects    │     │
+│  │  /camera/info        │      │  - classify_objects  │     │
+│  └──────────────────────┘      │  - get_positions     │     │
+│                                │  - generate_grasps   │     │
+│                                │  - build_scene_graph │     │
+│                                └──────────────────────┘     │
 └─────────────────────────────────────────────────────────────┘
 ```
 
