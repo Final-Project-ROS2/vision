@@ -60,6 +60,7 @@ setup(
             'camera_service = vision.camera_service_node:main',
             'sam_vision_pipeline = vision.sam_vision_pipeline_node:main',
             'simple_sam_detector = vision.simple_sam_detector:main',
+            'clip_classifier = vision.clip_classifier:main',
             'vision_demo = vision.vision_demo:main',
             'view_detections = scripts.view_detections:main',
             'test_services = scripts.test_services:main',

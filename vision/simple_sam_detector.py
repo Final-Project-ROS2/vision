@@ -20,6 +20,8 @@ from cv_bridge import CvBridge
 import cv2
 import numpy as np
 import sys
+import json
+from datetime import datetime
 from typing import List, Dict, Tuple
 
 
@@ -49,7 +51,9 @@ class SimpleSAMDetector(Node):
         
         # Latest image from camera
         self.latest_rgb = None
+        self.latest_depth = None  # For distance estimation if available
         self.latest_detections = []
+        self.frame_counter = 0
         
         # QoS profile for image subscription
         self.image_qos = QoSProfile(
@@ -63,6 +67,14 @@ class SimpleSAMDetector(Node):
             Image,
             '/camera/image_raw',
             self.rgb_callback,
+            self.image_qos
+        )
+        
+        # Subscribe to depth (optional for distance estimation)
+        self.depth_sub = self.create_subscription(
+            Image,
+            '/camera/depth/image_raw',
+            self.depth_callback,
             self.image_qos
         )
         
@@ -97,6 +109,7 @@ class SimpleSAMDetector(Node):
         try:
             # Convert ROS Image message to OpenCV format (BGR8)
             self.latest_rgb = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
+            self.frame_counter += 1
             
             # In continuous mode, detect on every frame
             if self.continuous_detection:
@@ -105,12 +118,23 @@ class SimpleSAMDetector(Node):
         except Exception as e:
             self.get_logger().error(f"Failed to convert image: {e}")
     
+    def depth_callback(self, msg: Image):
+        """Handle incoming depth images (optional, for distance estimation)"""
+        try:
+            self.latest_depth = self.bridge.imgmsg_to_cv2(msg, desired_encoding='passthrough')
+        except Exception as e:
+            self.get_logger().error(f"Failed to convert depth image: {e}")
+    
     def detect_service_callback(self, request, response):
         """Service callback for /vision/detect_objects"""
         try:
             if self.latest_rgb is None:
                 response.success = False
-                response.message = "No image available from /camera/image_raw"
+                response.message = json.dumps({
+                    "success": False,
+                    "error": "No image available from /camera/image_raw",
+                    "timestamp": datetime.utcnow().isoformat() + "Z"
+                }, indent=2)
                 self.get_logger().warn("⚠️ No image received yet")
                 return response
             
@@ -119,22 +143,30 @@ class SimpleSAMDetector(Node):
             # Run detection on current image
             self.latest_detections = self._detect_objects(self.latest_rgb)
             
+            # Build JSON response in the requested schema
+            detection_data = self._build_detection_schema()
+            
             response.success = True
-            response.message = f"Detected {len(self.latest_detections)} objects"
+            response.message = json.dumps(detection_data, indent=2)
             
             self.get_logger().info(f"✅ Detection complete: {len(self.latest_detections)} objects found")
             
             # Print detection details
             for i, det in enumerate(self.latest_detections):
                 bbox = det['bbox']
+                distance = det.get('distance_cm', 'N/A')
                 self.get_logger().info(
-                    f"   Object {i+1}: bbox=[{bbox[0]}, {bbox[1]}, {bbox[2]}, {bbox[3]}], "
-                    f"area={det['area']}, confidence={det['confidence']:.2f}"
+                    f"   {det['class_name']}: bbox={bbox}, "
+                    f"confidence={det['confidence']:.2f}, distance={distance}"
                 )
             
         except Exception as e:
             response.success = False
-            response.message = f"Detection error: {e}"
+            response.message = json.dumps({
+                "success": False,
+                "error": str(e),
+                "timestamp": datetime.utcnow().isoformat() + "Z"
+            }, indent=2)
             self.get_logger().error(f"❌ Detection error: {e}")
             import traceback
             self.get_logger().error(traceback.format_exc())
@@ -208,12 +240,28 @@ class SimpleSAMDetector(Node):
             circularity = 4 * np.pi * area / (perimeter * perimeter) if perimeter > 0 else 0
             confidence = min(0.95, 0.60 + circularity * 0.35)
             
+            # Estimate distance from depth image (if available)
+            distance_cm = None
+            center_x = x + w_box // 2
+            center_y = y + h_box // 2
+            if self.latest_depth is not None:
+                try:
+                    if 0 <= center_y < self.latest_depth.shape[0] and 0 <= center_x < self.latest_depth.shape[1]:
+                        depth_value = self.latest_depth[center_y, center_x]
+                        # Convert depth to cm (assuming depth is in mm or meters, adjust as needed)
+                        if depth_value > 0:
+                            distance_cm = float(depth_value) / 10.0  # Adjust conversion factor as needed
+                except Exception as e:
+                    pass  # Distance estimation failed, leave as None
+            
             detection = {
                 "id": f"obj_{i}",
-                "bbox": [x, y, x + w_box, y + h_box],
-                "center": [x + w_box // 2, y + h_box // 2],
-                "area": int(area),
+                "class_name": "object",  # Generic class, can be enhanced with actual classification
                 "confidence": float(confidence),
+                "bbox": [x, y, x + w_box, y + h_box],
+                "center": [center_x, center_y],
+                "area": int(area),
+                "distance_cm": distance_cm,
                 "mask": mask,
                 "contour": contour
             }
@@ -221,6 +269,60 @@ class SimpleSAMDetector(Node):
             detections.append(detection)
         
         return detections
+    
+    def _build_detection_schema(self) -> Dict:
+        """
+        Build detection response in the requested JSON schema format
+        
+        Returns:
+            Dictionary matching the schema with detections, summary, and metadata
+        """
+        # Frame identifier
+        frame_id = f"frame_{self.frame_counter:06d}"
+        
+        # Build detections list
+        detections_list = []
+        total_distance = 0.0
+        distance_count = 0
+        
+        for det in self.latest_detections:
+            detection_obj = {
+                "class_name": det.get("class_name", "object"),
+                "confidence": round(det["confidence"], 2),
+                "bbox": det["bbox"]
+            }
+            
+            # Add distance if available
+            if det.get("distance_cm") is not None:
+                detection_obj["distance_cm"] = round(det["distance_cm"], 1)
+                total_distance += det["distance_cm"]
+                distance_count += 1
+            
+            detections_list.append(detection_obj)
+        
+        # Calculate average distance
+        average_distance = round(total_distance / distance_count, 1) if distance_count > 0 else None
+        
+        # Build schema
+        schema = {
+            "success": True,
+            "detections": [
+                {
+                    "image_id": frame_id,
+                    "detections": detections_list
+                }
+            ],
+            "summary": {
+                "total_detections": len(self.latest_detections),
+                "timestamp": datetime.utcnow().isoformat() + "Z"
+            }
+        }
+        
+        # Add average_distance_cm only if we have distance data
+        if average_distance is not None:
+            schema["summary"]["average_distance_cm"] = average_distance
+        
+        return schema
     
     def visualization_callback(self):
         """Display camera feed with detections in OpenCV window"""
@@ -247,6 +349,7 @@ class SimpleSAMDetector(Node):
         for det in self.latest_detections:
             bbox = det['bbox']
             confidence = det['confidence']
+            distance = det.get('distance_cm')
             
             # Draw bounding box
             cv2.rectangle(
@@ -267,8 +370,12 @@ class SimpleSAMDetector(Node):
                 vis_image
             )
             
-            # Draw label
-            label = f"{det['id']}: {confidence:.2f}"
+            # Draw label with distance
+            if distance is not None:
+                label = f"{det.get('class_name', det['id'])}: {confidence:.2f} ({distance:.1f}cm)"
+            else:
+                label = f"{det.get('class_name', det['id'])}: {confidence:.2f}"
+            
             label_size, _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
             
             # Label background
