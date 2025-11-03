@@ -20,20 +20,22 @@ Both workflows use the same **4-stage vision pipeline**:
 ### Workflow 1: Static Image Pipeline
 ```
 ┌─────────────────┐
-│  Static Image   │
-│   (jpg/png)     │
+│ External Node   │
+│  Publishing to  │
+│ /camera/        │
+│   image_raw     │
 └────────┬────────┘
          │
          ↓
 ┌─────────────────┐      ┌──────────────────────┐
 │ Camera Service  │─────→│  SAM Vision Pipeline │
-│   (file mode)   │ ROS2 │  (4-stage process)   │
+│ (subscribe mode)│ ROS2 │  (4-stage process)   │
 │                 │Topics│                      │
-│ /camera/        │      │ Services:            │
-│   image_raw     │      │  - detect_objects    │
-│   depth_raw     │      │  - classify_objects  │
-└─────────────────┘      │  - generate_grasps   │
-                         │  - build_scene_graph │
+│ Subscribes &    │      │ Services:            │
+│ Re-publishes to │      │  - detect_objects    │
+│ /camera/        │      │  - classify_objects  │
+│   image_raw     │      │  - generate_grasps   │
+└─────────────────┘      │  - build_scene_graph │
                          └──────────────────────┘
 ```
 
@@ -66,34 +68,63 @@ Both workflows use the same **4-stage vision pipeline**:
 
 ## 🖼️ Workflow 1: Static Image Pipeline
 
-**Use Case:** Process an existing image file (jpg, png) through the vision pipeline.
+**Use Case:** Process images from an external camera node that publishes to `/camera/image_raw`.
 
 ### Step-by-Step Guide
 
-#### Step 1: Prepare Your Image
-Place your image in an accessible location, e.g.:
+#### Step 1: Start External Camera Node
+First, ensure you have a node publishing images to `/camera/image_raw`. This could be:
+- A ROS2 camera driver (e.g., `usb_cam`, `realsense2_camera`)
+- A custom image publisher node
+- A bag file playback: `ros2 bag play your_bag.db3`
+- The `show_rgb_image` viewer node (displays and republishes images)
+
+**Example A - Using RGB Image Viewer:**
 ```bash
-/home/group11/final_project_ws/src/vision/test_images/my_scene.jpg
+# Terminal 1: Start RGB viewer (subscribes to /camera/image_raw)
+ros2 run vision show_rgb_image
 ```
 
-#### Step 2: Start Camera Service (File Mode)
-**Terminal 1:**
+**Expected Output:**
+```
+[INFO] [1762167688.516158727] [rgb_image_viewer]: RGBImageViewer started.
+[INFO] [1762167688.516303761] [rgb_image_viewer]: Services: /show_rgb_image, /toggle_continuous_display
+[INFO] [1762167688.516400895] [rgb_image_viewer]: Subscribing to: /camera/image_raw
+```
+
+**Example B - Using Image Publisher:**
+```bash
+# Terminal 1: Publish a static image
+ros2 run image_publisher image_publisher_node \
+  /home/group11/final_project_ws/src/vision/test_images/my_scene.jpg
+```
+
+#### Step 2: Verify Image Topic
+Check that images are being published:
+```bash
+ros2 topic echo /camera/image_raw --no-arr
+```
+
+You should see image messages flowing.
+
+#### Step 3: Start Camera Service (Subscribe Mode)
+**Terminal 2:**
 ```bash
 cd /home/group11/final_project_ws
 source install/local_setup.bash
 
 ros2 run vision camera_service --ros-args \
-  -p camera_type:=file \
-  -p image_file:=/home/group11/final_project_ws/src/vision/test_images/my_scene.jpg
+  -p camera_type:=subscribe
 ```
 
 **What this does:**
-- Opens the image file
-- Publishes it to `/camera/image_raw` topic (continuously)
-- Makes it available for the vision pipeline
+- Subscribes to `/camera/image_raw` topic
+- Receives images from external node
+- Converts ROS Image → OpenCV using CV Bridge
+- Re-publishes or makes available for vision pipeline
 
-#### Step 3: Start Vision Pipeline
-**Terminal 2:**
+#### Step 4: Start Vision Pipeline
+**Terminal 3:**
 ```bash
 cd /home/group11/final_project_ws
 source install/local_setup.bash
@@ -106,16 +137,16 @@ ros2 run vision sam_vision_pipeline
 - Receives the image
 - Waits for service calls to process it
 
-#### Step 4: Process the Image
+#### Step 5: Process the Image
 
 **Option A - Run Full Pipeline (Recommended):**
-**Terminal 3:**
+**Terminal 4:**
 ```bash
 ros2 service call /vision/process_scene std_srvs/srv/Trigger
 ```
 
 **Option B - Run Step-by-Step:**
-**Terminal 3:**
+**Terminal 4:**
 ```bash
 # Step 1: Detect objects
 ros2 service call /vision/detect_objects std_srvs/srv/Trigger
@@ -133,7 +164,7 @@ ros2 service call /vision/generate_grasps std_srvs/srv/Trigger
 ros2 service call /vision/build_scene_graph std_srvs/srv/Trigger
 ```
 
-#### Step 5: View Results
+#### Step 6: View Results
 Results are saved to:
 ```bash
 ~/ros2_vision_outputs/scene_YYYYMMDD_HHMMSS/
@@ -227,25 +258,27 @@ Results are saved to:
 
 ## 🚀 Quick Start Scripts
 
-### Script 1: Process Existing Image
+### Script 1: Process Image from Subscriber
 ```bash
 #!/bin/bash
 cd /home/group11/final_project_ws
 source install/local_setup.bash
 
-# Terminal 1 (run in background)
+# Terminal 1 (run external camera publisher in background)
+# Example: ros2 run image_publisher image_publisher_node /path/to/image.jpg &
+
+# Terminal 2 (subscribe to /camera/image_raw)
 ros2 run vision camera_service --ros-args \
-  -p camera_type:=file \
-  -p image_file:=/path/to/your/image.jpg &
+  -p camera_type:=subscribe &
 
 sleep 3
 
-# Terminal 2 (run in background)
+# Terminal 3 (run vision pipeline in background)
 ros2 run vision sam_vision_pipeline &
 
 sleep 5
 
-# Terminal 3 (process)
+# Terminal 4 (process)
 ros2 service call /vision/process_scene std_srvs/srv/Trigger
 
 echo "✅ Processing complete! Check ~/ros2_vision_outputs/ for results"
@@ -533,6 +566,89 @@ ros2 service call /vision/process_scene std_srvs/srv/Trigger
 - `/camera/camera_info` - Camera intrinsic parameters
 - `/vision/debug_image` - Visualization with detections and grasps
 - `/vision/grasp_poses` - Generated grasp poses (geometry_msgs/PoseStamped)
+
+---
+
+## 🔍 Real CLI Examples
+
+### Example 1: Running RGB Image Viewer Node
+
+The `show_rgb_image` node subscribes to `/camera/image_raw` and displays images:
+
+```bash
+$ ros2 run vision show_rgb_image
+[INFO] [1762167688.516158727] [rgb_image_viewer]: RGBImageViewer started.
+[INFO] [1762167688.516303761] [rgb_image_viewer]: Services: /show_rgb_image, /toggle_continuous_display
+[INFO] [1762167688.516400895] [rgb_image_viewer]: Subscribing to: /camera/image_raw
+# Node runs and displays images from /camera/image_raw
+# Press Ctrl+C to stop
+```
+
+**What this node does:**
+- Subscribes to `/camera/image_raw` topic
+- Displays RGB images in OpenCV window
+- Provides services to control display behavior
+- Uses CV Bridge to convert ROS Image → OpenCV format
+
+**Available Services:**
+- `/show_rgb_image` - Display a single image
+- `/toggle_continuous_display` - Toggle continuous display mode
+
+### Example 2: Complete Workflow with Real Commands
+
+```bash
+# Terminal 1: Start webcam capture
+$ ros2 run vision camera_service
+[INFO] Webcam opened successfully
+[INFO] Publishing to /camera/image_raw
+
+# Terminal 2: View the camera feed (optional)
+$ ros2 run vision show_rgb_image
+[INFO] [rgb_image_viewer]: RGBImageViewer started.
+[INFO] [rgb_image_viewer]: Subscribing to: /camera/image_raw
+
+# Terminal 3: Start vision pipeline
+$ ros2 run vision sam_vision_pipeline
+[INFO] SAM Vision Pipeline started
+[INFO] Subscribing to /camera/image_raw
+
+# Terminal 4: Process the scene
+$ ros2 service call /vision/process_scene std_srvs/srv/Trigger
+waiting for service to become available...
+requester: making request: std_srvs.srv.Trigger_Request()
+
+response:
+std_srvs.srv.Trigger_Response(success=True, message='Scene processed successfully')
+```
+
+### Example 3: Checking Active Topics
+
+```bash
+# List all camera topics
+$ ros2 topic list | grep camera
+/camera/camera_info
+/camera/depth/image_raw
+/camera/image_raw
+
+# Check image messages
+$ ros2 topic echo /camera/image_raw --no-arr
+header:
+  stamp:
+    sec: 1762167688
+    nanosec: 516158727
+  frame_id: camera_frame
+height: 480
+width: 640
+encoding: bgr8
+is_bigendian: 0
+step: 1920
+# data: [omitted]
+
+# Check topic frequency
+$ ros2 topic hz /camera/image_raw
+average rate: 30.002
+  min: 0.033s max: 0.034s std dev: 0.00012s window: 30
+```
 
 ---
 

@@ -11,7 +11,7 @@ The vision system consists of two separate ROS2 nodes that work together:
 │                                                             │
 │  ┌──────────────────────┐      ┌──────────────────────┐     │
 │  │  Camera Service      │      │  SAM Vision Pipeline │     │
-│  │  Node                │─────▶│  Node               │     │
+│  │  Node                │─────▶│  Node                │     │
 │  └──────────────────────┘      └──────────────────────┘     │
 │           │                              │                  │
 │           │ Opens Camera                 │ Processes Images │
@@ -39,8 +39,11 @@ The vision system consists of two separate ROS2 nodes that work together:
 - Supports RGB webcams (USB, built-in)
 - Supports Intel RealSense depth cameras
 - Supports static image files for testing
+- Supports subscribing to existing `/camera/image_raw` topics
 - Configurable resolution and FPS
 - Auto-start capability
+- Webcam image capture and save functionality
+- Single-shot capture mode (capture once and exit)
 
 **Topics Published:**
 - `/camera/image_raw` (sensor_msgs/Image) - RGB stream
@@ -53,26 +56,33 @@ The vision system consists of two separate ROS2 nodes that work together:
 - `/camera/reset` (std_srvs/Trigger) - Reset connection
 
 **Parameters:**
-- `camera_type`: 'webcam', 'realsense', 'file'
+- `camera_type`: 'webcam', 'realsense', 'file', 'subscribe'
 - `camera_id`: Device ID (default: 0)
 - `image_file`: Path to image/video file
 - `width`: Resolution width (default: 640)
 - `height`: Resolution height (default: 480)
 - `fps`: Frame rate (default: 30.0)
 - `auto_start`: Auto-start on launch (default: true)
+- `save_images`: Save captured frames (default: false)
+- `save_interval`: Frames between saves (default: 30)
+- `capture_single_shot`: Capture one image and exit (default: false)
 
 **Usage:**
 ```bash
-# Webcam
+# Webcam (publishes to /camera/image_raw)
 ros2 run vision camera_service
 
-# RealSense
+# RealSense (publishes to /camera/image_raw + depth)
 ros2 run vision camera_service --ros-args -p camera_type:=realsense
 
-# Test image
+# Test image file (publishes to /camera/image_raw)
 ros2 run vision camera_service --ros-args \
   -p camera_type:=file \
   -p image_file:=Final-proj/src/arrange.jpg
+
+# Subscribe mode (subscribes to existing /camera/image_raw topic)
+ros2 run vision camera_service --ros-args \
+  -p camera_type:=subscribe
 ```
 
 ---
@@ -122,12 +132,13 @@ ros2 run vision sam_vision_pipeline
 
 ## Data Flow
 
+### Mode 1: Direct Hardware Capture
 ```
-Camera Hardware (Webcam/RealSense)
+Camera Hardware (Webcam/RealSense/File)
          ↓
-   CV Bridge (OpenCV)
+   CV Bridge (OpenCV → ROS)
          ↓
-   Camera Service Node
+   Camera Service Node (Publisher)
          ↓
    ROS2 Topics (/camera/*)
          ↓
@@ -136,6 +147,21 @@ Camera Hardware (Webcam/RealSense)
    Vision Services (/vision/*)
          ↓
    Results & Visualizations
+```
+
+### Mode 2: Topic Subscription
+```
+External Camera Node
+         ↓
+   ROS2 Topics (/camera/image_raw)
+         ↓
+   Camera Service Node (Subscriber)
+         ↓
+   CV Bridge (ROS → OpenCV)
+         ↓
+   Processing/Display/Storage
+         ↓
+   Re-publish or Save to Disk
 ```
 
 ---
@@ -275,6 +301,21 @@ ros2 run vision camera_service --ros-args \
 ros2 run vision camera_service --ros-args \
   -p camera_type:=file \
   -p image_file:=test_video.mp4
+```
+
+### Subscribe to Existing Camera Topic
+```bash
+# Subscribe to /camera/image_raw from another node
+ros2 run vision camera_service --ros-args \
+  -p camera_type:=subscribe
+```
+
+### Webcam Single-Shot Capture
+```bash
+# Capture one image from webcam and save to src-webcam/
+ros2 run vision camera_service --ros-args \
+  -p save_images:=true \
+  -p capture_single_shot:=true
 ```
 
 ---
