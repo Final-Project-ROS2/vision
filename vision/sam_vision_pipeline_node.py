@@ -350,27 +350,40 @@ class ROS2SAMVisionPipeline(Node):
             
             self.get_logger().info("Running object detection...")
             
-            # Run detection stage - use simulation mode for now
+            # Run detection using SAM pipeline adapter (will use OpenCV-based detection in simulation mode)
             from datetime import datetime
             
-            # Simulate detection results
-            h, w = self.latest_rgb.shape[:2]
-            detections = [
-                {"id": 0, "bbox": [w//4, h//4, w//2, h//2], "confidence": 0.85},
-                {"id": 1, "bbox": [w//2, h//3, 3*w//4, 2*h//3], "confidence": 0.78},
-            ]
-            masks = [np.zeros((h, w), dtype=np.uint8) for _ in detections]
+            if self.sam_pipeline is not None:
+                # Use SAM pipeline adapter for real detection
+                results = self.sam_pipeline.process_rgbd(
+                    self.latest_rgb,
+                    self.latest_depth,
+                    output_dir=None
+                )
+                detections = results.get("detections", [])
+                masks = [d.get("mask", np.zeros(self.latest_rgb.shape[:2], dtype=np.uint8)) for d in detections]
+                self.get_logger().info(f"✅ SAM adapter detected {len(detections)} objects from real image")
+            else:
+                # Fallback: Use OpenCV contour detection directly
+                self.get_logger().info("🔍 Using OpenCV contour detection (SAM adapter not available)")
+                detections, masks = self._opencv_detect_objects(self.latest_rgb)
+                self.get_logger().info(f"✅ OpenCV detected {len(detections)} objects from real image")
             
             self.cached_detections = {"detections": detections, "masks": masks, "timestamp": datetime.now()}
             
             response.success = True
-            response.message = f"Detected {len(detections)} objects (simulation mode)"
-            self.get_logger().info(f"Detection complete: {len(detections)} objects found (simulation)")
+            if len(detections) > 0:
+                response.message = f"Detected {len(detections)} real objects from camera image"
+            else:
+                response.message = "No objects detected in camera image"
+            self.get_logger().info(f"Detection complete: {len(detections)} objects found")
             
         except Exception as e:
             response.success = False
             response.message = f"Detection error: {e}"
             self.get_logger().error(f"Detection error: {e}")
+            import traceback
+            self.get_logger().error(traceback.format_exc())
         
         return response
     
@@ -590,6 +603,77 @@ class ROS2SAMVisionPipeline(Node):
             self.get_logger().error(f"Scene graph error: {e}")
         
         return response
+    
+    def _opencv_detect_objects(self, rgb_image: np.ndarray) -> Tuple[List[Dict], List[np.ndarray]]:
+        """
+        Detect objects using OpenCV contour detection (fallback when SAM not available)
+        This provides REAL detection from the actual camera image
+        """
+        # Convert to grayscale
+        gray = cv2.cvtColor(rgb_image, cv2.COLOR_BGR2GRAY)
+        
+        # Apply Gaussian blur to reduce noise
+        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+        
+        # Adaptive thresholding for better object separation
+        thresh = cv2.adaptiveThreshold(blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                       cv2.THRESH_BINARY_INV, 11, 2)
+        
+        # Morphological operations to clean up
+        kernel = np.ones((3, 3), np.uint8)
+        thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel, iterations=2)
+        thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel, iterations=1)
+        
+        # Find contours
+        contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        detections = []
+        masks = []
+        h, w = rgb_image.shape[:2]
+        min_area = (w * h) * 0.001  # Minimum 0.1% of image area
+        max_area = (w * h) * 0.8    # Maximum 80% of image area
+        
+        for i, contour in enumerate(contours):
+            area = cv2.contourArea(contour)
+            
+            # Filter by area
+            if area < min_area or area > max_area:
+                continue
+            
+            # Get bounding box
+            x, y, w_box, h_box = cv2.boundingRect(contour)
+            
+            # Filter small boxes
+            if w_box < 20 or h_box < 20:
+                continue
+            
+            # Create binary mask for this object
+            mask = np.zeros((h, w), dtype=np.uint8)
+            cv2.drawContours(mask, [contour], -1, 255, -1)
+            
+            # Calculate confidence based on contour properties
+            perimeter = cv2.arcLength(contour, True)
+            circularity = 4 * np.pi * area / (perimeter * perimeter) if perimeter > 0 else 0
+            confidence = min(0.95, 0.60 + circularity * 0.35)  # Higher confidence for more circular objects
+            
+            detection = {
+                "id": f"obj_{i}",
+                "class": "object",  # Will be classified by CLIP if available
+                "confidence": float(confidence),
+                "bbox": [x, y, x + w_box, y + h_box],
+                "center": [x + w_box // 2, y + h_box // 2],
+                "area": int(area),
+                "mask": mask
+            }
+            
+            detections.append(detection)
+            masks.append(mask)
+        
+        # If no objects detected, log it clearly
+        if not detections:
+            self.get_logger().warn("⚠️ No objects detected in image - scene may be empty or thresholds need adjustment")
+        
+        return detections, masks
     
     def process_current_scene(self) -> bool:
         """Process the current RGB-D scene through DINO pipeline"""
