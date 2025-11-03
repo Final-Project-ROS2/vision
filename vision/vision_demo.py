@@ -32,9 +32,9 @@ class VisionPipelineDemo(Node):
         self.process_client = self.create_client(Trigger, '/vision/process_scene')
         self.reset_client = self.create_client(Trigger, '/vision/reset_pipeline')
         
-        self.get_logger().info("🎬 SAM Vision Pipeline Demo Started!")
-        self.get_logger().info(f"📁 Demo images path: {self.demo_images_path}")
-        self.get_logger().info(f"📁 Results will be saved to: {self.output_path}")
+        self.get_logger().info(" SAM Vision Pipeline Demo Started!")
+        self.get_logger().info(f" Demo images path: {self.demo_images_path}")
+        self.get_logger().info(f" Results will be saved to: {self.output_path}")
         
         # Wait for services
         self.wait_for_services()
@@ -52,12 +52,12 @@ class VisionPipelineDemo(Node):
         while not self.reset_client.wait_for_service(timeout_sec=1.0):
             self.get_logger().info('Reset service not available, waiting...')
         
-        self.get_logger().info("✅ All services available!")
+        self.get_logger().info(" All services available!")
     
     def run_demo(self):
         """Run the complete demo sequence"""
         self.get_logger().info("\n" + "="*60)
-        self.get_logger().info("🚀 Starting SAM Vision Pipeline Demo")
+        self.get_logger().info(" Starting SAM Vision Pipeline Demo")
         self.get_logger().info("="*60)
         
         # Demo sequence
@@ -72,13 +72,13 @@ class VisionPipelineDemo(Node):
             self.get_logger().info(f"\n🎯 Running Demo {i}: {demo_func.__name__.replace('_', ' ').title()}")
             try:
                 demo_func()
-                self.get_logger().info(f"✅ Demo {i} completed successfully!")
+                self.get_logger().info(f" Demo {i} completed successfully!")
             except Exception as e:
-                self.get_logger().error(f"❌ Demo {i} failed: {e}")
+                self.get_logger().error(f" Demo {i} failed: {e}")
             
             time.sleep(2)  # Pause between demos
         
-        self.get_logger().info("\n🎉 All demos completed!")
+        self.get_logger().info("\n All demos completed!")
         self.show_demo_summary()
     
     def demo_1_basic_processing(self):
@@ -99,9 +99,9 @@ class VisionPipelineDemo(Node):
             success = self.call_service(self.process_client, f"Process {img_name}")
             
             if success:
-                self.get_logger().info(f"   ✅ {img_name} processed successfully")
+                self.get_logger().info(f"  {img_name} processed successfully")
             else:
-                self.get_logger().warn(f"   ⚠️ {img_name} processing failed")
+                self.get_logger().warn(f"   {img_name} processing failed")
             
             time.sleep(1)
     
@@ -149,7 +149,7 @@ class VisionPipelineDemo(Node):
     
     def demo_4_real_time_simulation(self):
         """Demo 4: Real-time processing simulation"""
-        self.get_logger().info("⚡ Testing real-time processing simulation...")
+        self.get_logger().info(" Testing real-time processing simulation...")
         
         # Simulate real-time processing
         processing_times = []
@@ -203,17 +203,17 @@ class VisionPipelineDemo(Node):
             if future.result() is not None:
                 response = future.result()
                 if response.success:
-                    self.get_logger().debug(f"✅ {description}: {response.message}")
+                    self.get_logger().debug(f" {description}: {response.message}")
                     return True
                 else:
-                    self.get_logger().warn(f"⚠️ {description}: {response.message}")
+                    self.get_logger().warn(f"{description}: {response.message}")
                     return False
             else:
-                self.get_logger().error(f"❌ {description}: Service call timed out")
+                self.get_logger().error(f" {description}: Service call timed out")
                 return False
                 
         except Exception as e:
-            self.get_logger().error(f"❌ {description}: Service call failed - {e}")
+            self.get_logger().error(f" {description}: Service call failed - {e}")
             return False
     
     def simulate_scene_analysis_output(self):

@@ -5,9 +5,6 @@ Opens webcam or depth camera and publishes images to ROS2 topics
 
 This node handles camera hardware and provides image streams for the vision pipeline.
 Supports RGB webcams, Intel RealSense, and other depth cameras.
-
-Author: ROS2 Vision Pipeline Team
-License: Apache-2.0
 """
 
 import rclpy
@@ -35,6 +32,10 @@ class CameraServiceNode(Node):
         - /camera/stop (Stop camera streaming)
         - /camera/reset (Reset camera connection)
         - /camera/set_resolution (Change camera resolution)
+
+        run with
+
+        ros2 run vision camera_service
     """
     
     def __init__(self):
