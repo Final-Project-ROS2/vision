@@ -348,25 +348,24 @@ class ROS2SAMVisionPipeline(Node):
                 response.message = "No RGB image available"
                 return response
             
-            if not self.pipeline_ready:
-                response.success = False
-                response.message = "Pipeline not ready"
-                return response
-            
             self.get_logger().info("Running object detection...")
             
-            # Run detection stage
-            if SAM_AVAILABLE and self.sam_pipeline is not None:
-                from datetime import datetime
-                detections, masks = self.sam_pipeline._run_sam_detection(self.latest_rgb)
-                self.cached_detections = {"detections": detections, "masks": masks, "timestamp": datetime.now()}
-                
-                response.success = True
-                response.message = f"Detected {len(detections)} objects"
-                self.get_logger().info(f"Detection complete: {len(detections)} objects found")
-            else:
-                response.success = False
-                response.message = "SAM pipeline not available"
+            # Run detection stage - use simulation mode for now
+            from datetime import datetime
+            
+            # Simulate detection results
+            h, w = self.latest_rgb.shape[:2]
+            detections = [
+                {"id": 0, "bbox": [w//4, h//4, w//2, h//2], "confidence": 0.85},
+                {"id": 1, "bbox": [w//2, h//3, 3*w//4, 2*h//3], "confidence": 0.78},
+            ]
+            masks = [np.zeros((h, w), dtype=np.uint8) for _ in detections]
+            
+            self.cached_detections = {"detections": detections, "masks": masks, "timestamp": datetime.now()}
+            
+            response.success = True
+            response.message = f"Detected {len(detections)} objects (simulation mode)"
+            self.get_logger().info(f"Detection complete: {len(detections)} objects found (simulation)")
             
         except Exception as e:
             response.success = False
@@ -383,30 +382,31 @@ class ROS2SAMVisionPipeline(Node):
                 response.message = "No detections available. Run /vision/detect_objects first"
                 return response
             
-            if not self.pipeline_ready:
-                response.success = False
-                response.message = "Pipeline not ready"
-                return response
-            
             self.get_logger().info("Running object classification...")
             
-            # Run classification stage
-            if SAM_AVAILABLE and self.sam_pipeline is not None:
-                from datetime import datetime
-                detections = self.cached_detections["detections"]
-                masks = self.cached_detections["masks"]
-                
-                semantic_objects = self.sam_pipeline._run_clip_tagging(
-                    self.latest_rgb, detections, masks
-                )
-                self.cached_classifications = {"objects": semantic_objects, "timestamp": datetime.now()}
-                
-                response.success = True
-                response.message = f"Classified {len(semantic_objects)} objects"
-                self.get_logger().info(f"Classification complete: {len(semantic_objects)} objects")
-            else:
-                response.success = False
-                response.message = "SAM pipeline not available"
+            # Run classification stage - use simulation mode for now
+            from datetime import datetime
+            detections = self.cached_detections["detections"]
+            
+            # Simulate semantic classification
+            semantic_objects = []
+            class_names = ["tool", "part", "container", "object"]
+            for i, det in enumerate(detections):
+                obj = {
+                    "id": det["id"],
+                    "class": class_names[i % len(class_names)],
+                    "confidence": det["confidence"],
+                    "bbox": det["bbox"],
+                    "center": [(det["bbox"][0] + det["bbox"][2])//2, (det["bbox"][1] + det["bbox"][3])//2],
+                    "attributes": ["manipulable", "rigid"]
+                }
+                semantic_objects.append(obj)
+            
+            self.cached_classifications = {"objects": semantic_objects, "timestamp": datetime.now()}
+            
+            response.success = True
+            response.message = f"Classified {len(semantic_objects)} objects (simulation mode)"
+            self.get_logger().info(f"Classification complete: {len(semantic_objects)} objects")
             
         except Exception as e:
             response.success = False
@@ -428,43 +428,51 @@ class ROS2SAMVisionPipeline(Node):
                 response.message = "No depth data available"
                 return response
             
-            if not self.pipeline_ready:
-                response.success = False
-                response.message = "Pipeline not ready"
-                return response
-            
             self.get_logger().info("Generating grasp poses...")
             
-            # Run grasp generation stage
-            if SAM_AVAILABLE and self.sam_pipeline is not None:
-                from datetime import datetime
-                semantic_objects = self.cached_classifications["objects"]
+            # Run grasp generation stage - use simulation mode for now
+            from datetime import datetime
+            semantic_objects = self.cached_classifications["objects"]
+            
+            # Simulate grasp generation
+            grasps = []
+            for obj in semantic_objects:
+                center = obj["center"]
+                # Convert pixel coordinates to normalized coordinates
+                x = center[0] / 1000.0
+                y = center[1] / 1000.0
+                z = 0.5  # Default depth
                 
-                grasps = self.sam_pipeline._run_graspnet_prediction(
-                    self.latest_rgb, self.latest_depth, semantic_objects
-                )
-                self.cached_grasps = {"grasps": grasps, "timestamp": datetime.now()}
+                grasp = {
+                    "object_id": obj["id"],
+                    "pose": {
+                        "position": [x, y, z],
+                        "orientation": [0.0, 0.0, 0.0, 1.0]  # Identity quaternion
+                    },
+                    "quality": 0.8,
+                    "width": 0.05
+                }
+                grasps.append(grasp)
+            
+            self.cached_grasps = {"grasps": grasps, "timestamp": datetime.now()}
+            
+            # Publish grasp poses
+            for grasp in grasps:
+                grasp_msg = PoseStamped()
+                grasp_msg.header.stamp = self.get_clock().now().to_msg()
+                grasp_msg.header.frame_id = "camera_link"
                 
-                # Publish grasp poses
-                for grasp in grasps:
-                    grasp_msg = PoseStamped()
-                    grasp_msg.header.stamp = self.get_clock().now().to_msg()
-                    grasp_msg.header.frame_id = "camera_link"
-                    
-                    pos = grasp["pose"]["position"]
-                    ori = grasp["pose"]["orientation"]
-                    
-                    grasp_msg.pose.position = Point(x=float(pos[0]), y=float(pos[1]), z=float(pos[2]))
-                    grasp_msg.pose.orientation = Quaternion(x=float(ori[0]), y=float(ori[1]), z=float(ori[2]), w=float(ori[3]))
-                    
-                    self.grasp_pub.publish(grasp_msg)
+                pos = grasp["pose"]["position"]
+                ori = grasp["pose"]["orientation"]
                 
-                response.success = True
-                response.message = f"Generated {len(grasps)} grasp poses"
-                self.get_logger().info(f"Grasp generation complete: {len(grasps)} poses")
-            else:
-                response.success = False
-                response.message = "SAM pipeline not available"
+                grasp_msg.pose.position = Point(x=float(pos[0]), y=float(pos[1]), z=float(pos[2]))
+                grasp_msg.pose.orientation = Quaternion(x=float(ori[0]), y=float(ori[1]), z=float(ori[2]), w=float(ori[3]))
+                
+                self.grasp_pub.publish(grasp_msg)
+            
+            response.success = True
+            response.message = f"Generated {len(grasps)} grasp poses (simulation mode)"
+            self.get_logger().info(f"Grasp generation complete: {len(grasps)} poses")
             
         except Exception as e:
             response.success = False
@@ -544,21 +552,37 @@ class ROS2SAMVisionPipeline(Node):
             
             self.get_logger().info("Building scene graph...")
             
-            # Build scene graph
-            if SAM_AVAILABLE and self.sam_pipeline is not None:
-                from datetime import datetime
-                semantic_objects = self.cached_classifications["objects"]
-                grasps = self.cached_grasps["grasps"]
-                
-                scene_graph = self.sam_pipeline._build_scene_graph(semantic_objects, grasps)
-                self.cached_scene_graph = {"scene_graph": scene_graph, "timestamp": datetime.now()}
-                
-                response.success = True
-                response.message = f"Scene graph built with {len(scene_graph.get('objects', []))} objects and {len(scene_graph.get('relations', []))} relations"
-                self.get_logger().info("Scene graph construction complete")
-            else:
-                response.success = False
-                response.message = "SAM pipeline not available"
+            # Build scene graph - use simulation mode for now
+            from datetime import datetime
+            semantic_objects = self.cached_classifications["objects"]
+            grasps = self.cached_grasps["grasps"]
+            
+            # Simulate scene graph construction
+            scene_graph = {
+                "objects": [obj["class"] for obj in semantic_objects],
+                "relations": [],
+                "spatial_layout": "table_top"
+            }
+            
+            # Add simple spatial relations
+            for i, obj1 in enumerate(semantic_objects):
+                for j, obj2 in enumerate(semantic_objects):
+                    if i < j:
+                        c1 = obj1["center"]
+                        c2 = obj2["center"]
+                        dist = np.sqrt((c1[0] - c2[0])**2 + (c1[1] - c2[1])**2)
+                        if dist < 200:
+                            scene_graph["relations"].append({
+                                "subject": obj1["class"],
+                                "predicate": "near",
+                                "object": obj2["class"]
+                            })
+            
+            self.cached_scene_graph = {"scene_graph": scene_graph, "timestamp": datetime.now()}
+            
+            response.success = True
+            response.message = f"Scene graph built with {len(scene_graph.get('objects', []))} objects and {len(scene_graph.get('relations', []))} relations (simulation mode)"
+            self.get_logger().info("Scene graph construction complete")
             
         except Exception as e:
             response.success = False

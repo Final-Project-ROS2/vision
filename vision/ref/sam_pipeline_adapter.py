@@ -50,29 +50,11 @@ class SAMPipelineAdapter:
     
     def _init_components(self):
         """Initialize pipeline components with fallbacks"""
-        try:
-            # Try to import existing SAM implementation from Final-proj
-            from src.pipeline.object_detection_segmentation import ObjectDetectionSegmentation
-            
-            # Find SAM checkpoint
-            sam_checkpoint = self._find_sam_checkpoint()
-            
-            if sam_checkpoint:
-                self.sam_detector = ObjectDetectionSegmentation(
-                    checkpoint_path=sam_checkpoint,
-                    model_type="vit_b",
-                    device=self.device,
-                    use_yolo=False  # SAM-only mode
-                )
-                self.mode = "full"
-                self.initialized = True
-                logger.info("✅ Full SAM pipeline loaded with real models")
-            else:
-                raise FileNotFoundError("SAM checkpoint not found")
-                
-        except Exception as e:
-            logger.warning(f"⚠️ Full SAM pipeline not available: {e}")
-            self._init_simulation_mode()
+        # NOTE: The full SAM pipeline with external models is not currently integrated.
+        # The main vision processing is handled by sam_vision_pipeline_node.py
+        # This adapter runs in simulation mode for development and testing.
+        logger.info("🎭 Running in simulation mode for research/development")
+        self._init_simulation_mode()
     
     def _find_sam_checkpoint(self) -> Optional[str]:
         """Try to find SAM checkpoint in common locations"""

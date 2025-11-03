@@ -16,6 +16,9 @@ import cv2
 import numpy as np
 from typing import Optional, Tuple
 import time
+import os
+from pathlib import Path
+from datetime import datetime
 
 
 class CameraServiceNode(Node):
@@ -50,6 +53,20 @@ class CameraServiceNode(Node):
         self.is_streaming = False
         self.camera_type = None  # 'webcam', 'realsense', 'file'
         
+        # Image saving configuration
+        self.save_images = False
+        self.save_counter = 0
+        self.save_interval = 30  # Save every 30 frames (1 second at 30fps)
+        self.frame_counter = 0
+        self.capture_single_shot = False  # New: capture one image and exit
+        self.has_captured_single_shot = False  # Track if single shot was captured
+        
+        # Create save directory - use workspace source directory
+        # Find the workspace root by going up from install/build to src
+        workspace_root = Path.home() / "final_project_ws"
+        self.save_dir = workspace_root / "src" / "vision" / "src-webcam"
+        self.save_dir.mkdir(parents=True, exist_ok=True)
+        
         # Camera parameters
         self.declare_parameter('camera_id', 0)
         self.declare_parameter('camera_type', 'webcam')  # 'webcam', 'realsense', 'file'
@@ -58,6 +75,9 @@ class CameraServiceNode(Node):
         self.declare_parameter('height', 480)
         self.declare_parameter('fps', 30.0)
         self.declare_parameter('auto_start', True)
+        self.declare_parameter('save_images', True)  # New parameter to enable/disable saving
+        self.declare_parameter('save_interval', 30)  # Frames between saves
+        self.declare_parameter('capture_single_shot', False)  # Capture one image and exit
         
         # Get parameters
         self.camera_id = self.get_parameter('camera_id').get_parameter_value().integer_value
@@ -67,6 +87,9 @@ class CameraServiceNode(Node):
         self.height = self.get_parameter('height').get_parameter_value().integer_value
         self.fps = self.get_parameter('fps').get_parameter_value().double_value
         self.auto_start = self.get_parameter('auto_start').get_parameter_value().bool_value
+        self.save_images = self.get_parameter('save_images').get_parameter_value().bool_value
+        self.save_interval = self.get_parameter('save_interval').get_parameter_value().integer_value
+        self.capture_single_shot = self.get_parameter('capture_single_shot').get_parameter_value().bool_value
         
         # Publishers
         self.rgb_pub = self.create_publisher(Image, '/camera/image_raw', 10)
@@ -88,6 +111,10 @@ class CameraServiceNode(Node):
         self.get_logger().info(f"Camera ID: {self.camera_id}")
         self.get_logger().info(f"Resolution: {self.width}x{self.height}")
         self.get_logger().info(f"FPS: {self.fps}")
+        self.get_logger().info(f"Save Images: {self.save_images}")
+        if self.save_images:
+            self.get_logger().info(f"Save Directory: {self.save_dir}")
+            self.get_logger().info(f"Save Interval: Every {self.save_interval} frames")
         
         # Auto-start camera if enabled
         if self.auto_start:
@@ -230,6 +257,28 @@ class CameraServiceNode(Node):
                 self.get_logger().warn("Failed to read frame")
                 return
             
+            # Save image periodically if enabled and webcam is active
+            if self.save_images and self.camera_type == 'webcam':
+                # Single shot mode: capture one image and exit
+                if self.capture_single_shot and not self.has_captured_single_shot:
+                    self._save_frame(frame)
+                    self.has_captured_single_shot = True
+                    self.get_logger().info("✅ Single shot captured! Shutting down...")
+                    # Stop streaming and exit
+                    self.is_streaming = False
+                    if self.camera is not None:
+                        self.camera.release()
+                    # Schedule shutdown
+                    self.create_timer(0.5, self._shutdown_node)
+                    return
+                
+                # Continuous mode: save at intervals
+                elif not self.capture_single_shot:
+                    self.frame_counter += 1
+                    if self.frame_counter >= self.save_interval:
+                        self._save_frame(frame)
+                        self.frame_counter = 0
+            
             # Convert to ROS message
             rgb_msg = self.bridge.cv2_to_imgmsg(frame, encoding='bgr8')
             rgb_msg.header.stamp = self.get_clock().now().to_msg()
@@ -285,6 +334,26 @@ class CameraServiceNode(Node):
             
         except Exception as e:
             self.get_logger().error(f"Error publishing RealSense frame: {e}")
+    
+    def _save_frame(self, frame):
+        """Save frame to disk"""
+        try:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+            filename = f"webcam_{timestamp}.jpg"
+            filepath = self.save_dir / filename
+            
+            cv2.imwrite(str(filepath), frame)
+            self.save_counter += 1
+            self.get_logger().info(f"💾 Saved frame #{self.save_counter}: {filename}")
+            
+        except Exception as e:
+            self.get_logger().error(f"Failed to save frame: {e}")
+    
+    def _shutdown_node(self):
+        """Shutdown the node gracefully"""
+        import sys
+        self.get_logger().info("🛑 Node shutting down...")
+        sys.exit(0)
     
     def _publish_camera_info(self, width: int, height: int):
         """Publish camera intrinsic parameters"""

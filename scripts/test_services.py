@@ -20,9 +20,9 @@ class ServiceTester(Node):
     
     def __init__(self):
         super().__init__('service_tester')
-        
+
         # Define all services to test
-        self.services = {
+        self.service_list = {
             '/vision/detect_objects': 'Object Detection',
             '/vision/classify_objects': 'Object Classification',
             '/vision/generate_grasps': 'Grasp Generation',
@@ -31,11 +31,11 @@ class ServiceTester(Node):
             '/vision/process_scene': 'Full Pipeline Processing',
             '/vision/reset_pipeline': 'Pipeline Reset'
         }
-        
+
         # Create service clients
-        self.clients = {}
-        for service_name in self.services.keys():
-            self.clients[service_name] = self.create_client(Trigger, service_name)
+        self.service_clients = {}
+        for service_name in self.service_list.keys():
+            self.service_clients[service_name] = self.create_client(Trigger, service_name)
         
         self.get_logger().info("Service Tester Node initialized")
     
@@ -44,10 +44,10 @@ class ServiceTester(Node):
         self.get_logger().info("Waiting for vision pipeline services...")
         
         all_ready = True
-        for service_name, description in self.services.items():
+        for service_name, description in self.service_list.items():
             self.get_logger().info(f"  Checking {service_name}...")
             
-            if not self.clients[service_name].wait_for_service(timeout_sec=timeout_sec):
+            if not self.service_clients[service_name].wait_for_service(timeout_sec=timeout_sec):
                 self.get_logger().error(f"  [FAIL] {service_name} not available")
                 all_ready = False
             else:
@@ -61,7 +61,7 @@ class ServiceTester(Node):
         
         try:
             request = Trigger.Request()
-            future = self.clients[service_name].call_async(request)
+            future = self.service_clients[service_name].call_async(request)
             
             # Wait for response
             rclpy.spin_until_future_complete(self, future, timeout_sec=10.0)
@@ -162,7 +162,7 @@ class ServiceTester(Node):
         self.get_logger().info("Individual Service Availability Test")
         self.get_logger().info("="*70)
         
-        for service_name, description in self.services.items():
+        for service_name, description in self.service_list.items():
             self.get_logger().info(f"\nTesting: {service_name}")
             success, msg = self.call_service(service_name, description)
             

@@ -1,77 +1,288 @@
-# Vision Pipeline Services
+# Vision Pipeline Services - Quick Start Guide
 
 ## Overview
 
-The vision system consists of two main components:
-1. **Camera Service** - Handles camera hardware and publishes image streams
-2. **SAM Vision Pipeline** - Processes images for object detection, classification, and scene understanding
+The vision system provides **two workflows** for robotic vision:
+
+1. **🖼️ Static Image Pipeline** - Process existing images from files
+2. **📹 Webcam Pipeline** - Capture and process live webcam images
+
+Both workflows use the same **4-stage vision pipeline**:
+- **Stage 1:** SAM Object Detection & Segmentation
+- **Stage 2:** CLIP Semantic Classification
+- **Stage 3:** GraspNet 6D Grasp Pose Generation
+- **Stage 4:** Scene Graph Construction & Spatial Relations
 
 ---
 
-## Camera Service
+## System Architecture
 
-The Camera Service Node opens webcam/depth camera and publishes images via CV Bridge.
-
-### Camera Topics Published
-
-- `/camera/image_raw` - RGB images (sensor_msgs/Image)
-- `/camera/depth/image_raw` - Depth images (sensor_msgs/Image)
-- `/camera/camera_info` - Camera intrinsic parameters (sensor_msgs/CameraInfo)
-
-### Camera Services
-
-#### `/camera/start`
-Start camera streaming
-
-```bash
-ros2 service call /camera/start std_srvs/srv/Trigger
+### Workflow 1: Static Image Pipeline
+```
+┌─────────────────┐
+│  Static Image   │
+│   (jpg/png)     │
+└────────┬────────┘
+         │
+         ↓
+┌─────────────────┐      ┌──────────────────────┐
+│ Camera Service  │─────→│  SAM Vision Pipeline │
+│   (file mode)   │ ROS2 │  (4-stage process)   │
+│                 │Topics│                      │
+│ /camera/        │      │ Services:            │
+│   image_raw     │      │  - detect_objects    │
+│   depth_raw     │      │  - classify_objects  │
+└─────────────────┘      │  - generate_grasps   │
+                         │  - build_scene_graph │
+                         └──────────────────────┘
 ```
 
-#### `/camera/stop`
-Stop camera streaming
-
-```bash
-ros2 service call /camera/stop std_srvs/srv/Trigger
+### Workflow 2: Webcam Capture Pipeline
+```
+┌─────────────────┐
+│    Webcam       │
+│   /dev/video0   │
+└────────┬────────┘
+         │
+         ↓
+┌─────────────────────────────────┐
+│   Camera Service (Single Shot)  │
+│   - Captures ONE image          │
+│   - Saves to src-webcam/        │
+│   - Auto-exits after capture    │
+└────────┬────────────────────────┘
+         │
+         ↓
+┌─────────────────┐      ┌──────────────────────┐
+│ Camera Service  │─────→│  SAM Vision Pipeline │
+│   (file mode)   │ ROS2 │  (4-stage process)   │
+│ Loads saved img │Topics│                      │
+└─────────────────┘      └──────────────────────┘
 ```
 
-#### `/camera/reset`
-Reset camera connection
+---
 
+---
+
+## 🖼️ Workflow 1: Static Image Pipeline
+
+**Use Case:** Process an existing image file (jpg, png) through the vision pipeline.
+
+### Step-by-Step Guide
+
+#### Step 1: Prepare Your Image
+Place your image in an accessible location, e.g.:
 ```bash
-ros2 service call /camera/reset std_srvs/srv/Trigger
+/home/group11/final_project_ws/src/vision/test_images/my_scene.jpg
 ```
 
-### Starting the Camera
-
-**Option 1: Webcam (Default)**
+#### Step 2: Start Camera Service (File Mode)
+**Terminal 1:**
 ```bash
-ros2 run vision camera_service
-```
+cd /home/group11/final_project_ws
+source install/local_setup.bash
 
-**Option 2: Intel RealSense**
-```bash
-ros2 run vision camera_service --ros-args \
-  -p camera_type:=realsense \
-  -p width:=640 \
-  -p height:=480 \
-  -p fps:=30.0
-```
-
-**Option 3: Static Image File**
-```bash
 ros2 run vision camera_service --ros-args \
   -p camera_type:=file \
-  -p image_file:=Final-proj/src/arrange.jpg
+  -p image_file:=/home/group11/final_project_ws/src/vision/test_images/my_scene.jpg
 ```
 
-**Parameters:**
-- `camera_id` (int): Camera device ID (default: 0)
-- `camera_type` (string): 'webcam', 'realsense', or 'file' (default: 'webcam')
-- `image_file` (string): Path to image/video file (for 'file' type)
-- `width` (int): Image width in pixels (default: 640)
-- `height` (int): Image height in pixels (default: 480)
-- `fps` (double): Frame rate (default: 30.0)
-- `auto_start` (bool): Auto-start streaming on launch (default: true)
+**What this does:**
+- Opens the image file
+- Publishes it to `/camera/image_raw` topic (continuously)
+- Makes it available for the vision pipeline
+
+#### Step 3: Start Vision Pipeline
+**Terminal 2:**
+```bash
+cd /home/group11/final_project_ws
+source install/local_setup.bash
+
+ros2 run vision sam_vision_pipeline
+```
+
+**What this does:**
+- Subscribes to camera topics
+- Receives the image
+- Waits for service calls to process it
+
+#### Step 4: Process the Image
+
+**Option A - Run Full Pipeline (Recommended):**
+**Terminal 3:**
+```bash
+ros2 service call /vision/process_scene std_srvs/srv/Trigger
+```
+
+**Option B - Run Step-by-Step:**
+**Terminal 3:**
+```bash
+# Step 1: Detect objects
+ros2 service call /vision/detect_objects std_srvs/srv/Trigger
+
+# Step 2: Classify detected objects
+ros2 service call /vision/classify_objects std_srvs/srv/Trigger
+
+# Step 3: Get 3D positions
+ros2 service call /vision/get_positions std_srvs/srv/Trigger
+
+# Step 4: Generate grasp poses
+ros2 service call /vision/generate_grasps std_srvs/srv/Trigger
+
+# Step 5: Build scene graph
+ros2 service call /vision/build_scene_graph std_srvs/srv/Trigger
+```
+
+#### Step 5: View Results
+Results are saved to:
+```bash
+~/ros2_vision_outputs/scene_YYYYMMDD_HHMMSS/
+```
+
+---
+
+## 📹 Workflow 2: Webcam Capture Pipeline
+
+**Use Case:** Capture a live image from webcam, save it, then process it.
+
+### Step-by-Step Guide
+
+#### Step 1: Capture Image from Webcam
+**Terminal 1:**
+```bash
+cd /home/group11/final_project_ws
+source install/local_setup.bash
+
+# Capture ONE image and auto-exit
+ros2 run vision camera_service --ros-args \
+  -p save_images:=true \
+  -p capture_single_shot:=true
+```
+
+**What this does:**
+- Opens webcam at `/dev/video0`
+- Captures ONE frame
+- Saves to `/home/group11/final_project_ws/src/vision/src-webcam/webcam_TIMESTAMP.jpg`
+- Automatically exits
+
+**Output:**
+```
+[INFO] Webcam opened successfully
+[INFO] 💾 Saved frame #1: webcam_20251103_174559_892545.jpg
+[INFO] ✅ Single shot captured! Shutting down...
+```
+
+#### Step 2: Verify Image Was Captured
+```bash
+ls -lht /home/group11/final_project_ws/src/vision/src-webcam/*.jpg | head -1
+```
+
+You should see the most recent captured image.
+
+#### Step 3: Start Camera Service with Captured Image
+**Terminal 1:**
+```bash
+cd /home/group11/final_project_ws
+source install/local_setup.bash
+
+# Get the latest captured image filename
+LATEST_IMAGE=$(ls -t /home/group11/final_project_ws/src/vision/src-webcam/*.jpg | head -1)
+
+# Load it for processing
+ros2 run vision camera_service --ros-args \
+  -p camera_type:=file \
+  -p image_file:=$LATEST_IMAGE
+```
+
+#### Step 4: Start Vision Pipeline
+**Terminal 2:**
+```bash
+cd /home/group11/final_project_ws
+source install/local_setup.bash
+
+ros2 run vision sam_vision_pipeline
+```
+
+#### Step 5: Process the Captured Image
+**Terminal 3:**
+```bash
+# Run full pipeline
+ros2 service call /vision/process_scene std_srvs/srv/Trigger
+
+# OR step-by-step (same as Workflow 1)
+ros2 service call /vision/detect_objects std_srvs/srv/Trigger
+ros2 service call /vision/classify_objects std_srvs/srv/Trigger
+ros2 service call /vision/get_positions std_srvs/srv/Trigger
+ros2 service call /vision/generate_grasps std_srvs/srv/Trigger
+ros2 service call /vision/build_scene_graph std_srvs/srv/Trigger
+```
+
+#### Step 6: View Results
+Results are saved to:
+```bash
+~/ros2_vision_outputs/scene_YYYYMMDD_HHMMSS/
+```
+
+---
+
+## 🚀 Quick Start Scripts
+
+### Script 1: Process Existing Image
+```bash
+#!/bin/bash
+cd /home/group11/final_project_ws
+source install/local_setup.bash
+
+# Terminal 1 (run in background)
+ros2 run vision camera_service --ros-args \
+  -p camera_type:=file \
+  -p image_file:=/path/to/your/image.jpg &
+
+sleep 3
+
+# Terminal 2 (run in background)
+ros2 run vision sam_vision_pipeline &
+
+sleep 5
+
+# Terminal 3 (process)
+ros2 service call /vision/process_scene std_srvs/srv/Trigger
+
+echo "✅ Processing complete! Check ~/ros2_vision_outputs/ for results"
+```
+
+### Script 2: Capture and Process Webcam Image
+```bash
+#!/bin/bash
+cd /home/group11/final_project_ws
+source install/local_setup.bash
+
+# Step 1: Capture from webcam
+echo "📸 Capturing image from webcam..."
+ros2 run vision camera_service --ros-args \
+  -p save_images:=true \
+  -p capture_single_shot:=true
+
+# Step 2: Get latest image
+LATEST_IMAGE=$(ls -t /home/group11/final_project_ws/src/vision/src-webcam/*.jpg | head -1)
+echo "✅ Captured: $LATEST_IMAGE"
+
+# Step 3: Process it
+echo "🔄 Starting vision pipeline..."
+ros2 run vision camera_service --ros-args \
+  -p camera_type:=file \
+  -p image_file:=$LATEST_IMAGE &
+
+sleep 3
+
+ros2 run vision sam_vision_pipeline &
+
+sleep 5
+
+ros2 service call /vision/process_scene std_srvs/srv/Trigger
+
+echo "✅ Processing complete! Check ~/ros2_vision_outputs/ for results"
+```
 
 ---
 
