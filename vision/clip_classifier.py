@@ -28,6 +28,18 @@ ros2 run vision clip_classifier
 ros2 service call /vision/classify_detect std_srvs/srv/Trigger
 
 
+
+
+
+You call: ros2 service call /vision/classify_detect std_srvs/srv/Trigger
+CLIP's classify_detect_callback is triggered
+CLIP internally calls: /vision/detect_objects service (SAM)
+SAM's detect_service_callback returns JSON with bounding boxes
+CLIP parses the bounding boxes from the JSON response
+CLIP crops each region and classifies it
+CLIP returns the final JSON with classifications
+
+
 """
 
 import rclpy
@@ -101,9 +113,11 @@ class CLIPClassifier(Node):
         
         # Latest image from camera
         self.latest_rgb = None
+        self.captured_frame = None  # Single captured frame for classification
         self.latest_classification = None
         self.latest_region_classifications = []  # For classify_detect
         self.frame_counter = 0
+        self.frame_captured = False
         
         # CLIP model
         self.model = None
@@ -203,6 +217,12 @@ class CLIPClassifier(Node):
             # Convert ROS Image message to OpenCV format (BGR8)
             self.latest_rgb = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
             self.frame_counter += 1
+            
+            # Capture first frame for classification
+            if not self.frame_captured:
+                self.captured_frame = self.latest_rgb.copy()
+                self.frame_captured = True
+                self.get_logger().info(f"📸 Captured frame {self.frame_counter} for classification")
                 
         except Exception as e:
             self.get_logger().error(f"Failed to convert image: {e}")
@@ -210,15 +230,15 @@ class CLIPClassifier(Node):
     def classify_all_callback(self, request, response):
         """Service callback for /vision/classify_all - classify entire image"""
         try:
-            if self.latest_rgb is None:
+            if self.captured_frame is None:
                 response.success = False
                 response.message = json.dumps({
                     "pipeline": "single_clip",
                     "success": False,
-                    "error": "No image available from /camera/image_raw",
+                    "error": "No frame captured yet from /camera/image_raw",
                     "timestamp": datetime.utcnow().isoformat() + "Z"
                 }, indent=2)
-                self.get_logger().warn("⚠️ No image received yet")
+                self.get_logger().warn("⚠️ No frame captured yet")
                 return response
             
             if not CLIP_AVAILABLE or self.model is None:
@@ -232,10 +252,10 @@ class CLIPClassifier(Node):
                 self.get_logger().error("❌ CLIP model not available")
                 return response
             
-            self.get_logger().info("🔍 Running CLIP classification on entire image...")
+            self.get_logger().info("🔍 Running CLIP classification on captured frame...")
             
-            # Run classification
-            classification_data = self._classify_image(self.latest_rgb)
+            # Run classification on captured frame
+            classification_data = self._classify_image(self.captured_frame)
             self.latest_classification = classification_data
             self.latest_region_classifications = []  # Clear region classifications
             
@@ -265,16 +285,22 @@ class CLIPClassifier(Node):
     def classify_detect_callback(self, request, response):
         """Service callback for /vision/classify_detect - detect objects then classify regions"""
         try:
-            if self.latest_rgb is None:
+            if self.captured_frame is None:
                 response.success = False
                 response.message = json.dumps({
                     "pipeline": "clip_with_detection",
                     "success": False,
-                    "error": "No image available from /camera/image_raw",
+                    "error": "No frame captured yet from /camera/image_raw",
                     "timestamp": datetime.utcnow().isoformat() + "Z"
                 }, indent=2)
-                self.get_logger().warn("⚠️ No image received yet")
+                self.get_logger().warn("⚠️ No frame captured yet")
                 return response
+            
+            # Confirm using captured frame
+            self.get_logger().info("=" * 80)
+            self.get_logger().info(f"📸 Using CAPTURED FRAME {self.frame_counter} for detection + classification")
+            self.get_logger().info(f"   Frame shape: {self.captured_frame.shape}")
+            self.get_logger().info("=" * 80)
             
             if not CLIP_AVAILABLE or self.model is None:
                 response.success = False
@@ -290,8 +316,8 @@ class CLIPClassifier(Node):
             # Step 1: Call SAM detector to get bounding boxes
             self.get_logger().info("🔍 Step 1/2: Calling /vision/detect_objects service...")
             
-            # Wait for SAM detector service with longer timeout
-            if not self.sam_detector_client.wait_for_service(timeout_sec=5.0):
+            # Wait for SAM detector service with shorter timeout
+            if not self.sam_detector_client.wait_for_service(timeout_sec=2.0):
                 response.success = False
                 response.message = json.dumps({
                     "pipeline": "clip_with_detection",
@@ -309,26 +335,36 @@ class CLIPClassifier(Node):
             sam_request = Trigger.Request()
             sam_future = self.sam_detector_client.call_async(sam_request)
             
-            self.get_logger().info("⏳ Waiting for SAM detection to complete...")
+            self.get_logger().info("⏳ Waiting for SAM detection to complete (this may take 10-15 seconds)...")
             
-            # Wait for response with longer timeout (30 seconds for heavy processing)
+            # Wait for response with timeout and active spinning
             timeout_start = time.time()
-            timeout_duration = 30.0
+            timeout_duration = 20.0  # Reduced from 30s
             
-            while not sam_future.done() and (time.time() - timeout_start) < timeout_duration:
+            while not sam_future.done():
+                elapsed = time.time() - timeout_start
+                if elapsed >= timeout_duration:
+                    self.get_logger().error(f"❌ SAM detection timeout after {timeout_duration}s")
+                    self.get_logger().error("   This usually means:")
+                    self.get_logger().error("   1. SAM detector is not running → Start with: ros2 run vision simple_sam_detector")
+                    self.get_logger().error("   2. SAM is processing but too slow → Check GPU/CPU usage")
+                    self.get_logger().error("   3. SAM is not receiving images → Check /camera/image_raw topic")
+                    
+                    response.success = False
+                    response.message = json.dumps({
+                        "pipeline": "clip_with_detection",
+                        "success": False,
+                        "error": f"SAM detection timeout after {timeout_duration}s. Make sure simple_sam_detector is running and processing images.",
+                        "timestamp": datetime.utcnow().isoformat() + "Z"
+                    }, indent=2)
+                    return response
+                
+                # Actively spin to process callbacks
                 rclpy.spin_once(self, timeout_sec=0.1)
-            
-            if not sam_future.done():
-                response.success = False
-                response.message = json.dumps({
-                    "pipeline": "clip_with_detection",
-                    "success": False,
-                    "error": f"SAM detection timeout after {timeout_duration} seconds. Check if simple_sam_detector is processing images.",
-                    "timestamp": datetime.utcnow().isoformat() + "Z"
-                }, indent=2)
-                self.get_logger().error(f"❌ SAM detection timeout after {timeout_duration}s")
-                self.get_logger().error("   Check if SAM detector is receiving /camera/image_raw")
-                return response
+                
+                # Show progress every 2 seconds
+                if int(elapsed) % 2 == 0 and elapsed > 0:
+                    self.get_logger().info(f"   Still waiting... ({elapsed:.0f}s / {timeout_duration}s)")
             
             try:
                 sam_response = sam_future.result()
@@ -343,7 +379,14 @@ class CLIPClassifier(Node):
                 self.get_logger().error(f"❌ Failed to get SAM response: {e}")
                 return response
             
-            self.get_logger().info(f"✅ SAM response received (success={sam_response.success})")
+            self.get_logger().info(f"✅ SAM response received in {time.time() - timeout_start:.1f}s")
+            
+            # Print full SAM JSON response for debugging
+            self.get_logger().info("=" * 80)
+            self.get_logger().info("📋 SAM JSON RESPONSE (FULL):")
+            self.get_logger().info("=" * 80)
+            self.get_logger().info(sam_response.message)
+            self.get_logger().info("=" * 80)
             
             if not sam_response.success:
                 response.success = False
@@ -351,9 +394,11 @@ class CLIPClassifier(Node):
                     "pipeline": "clip_with_detection",
                     "success": False,
                     "error": f"SAM detection failed: {sam_response.message}",
+                    "sam_message": sam_response.message[:500],  # First 500 chars for debugging
                     "timestamp": datetime.utcnow().isoformat() + "Z"
                 }, indent=2)
-                self.get_logger().error(f"❌ SAM detection failed: {sam_response.message}")
+                self.get_logger().error(f"❌ SAM detection failed")
+                self.get_logger().error(f"   SAM message: {sam_response.message[:200]}")
                 return response
             
             # Parse SAM detection results
@@ -361,6 +406,9 @@ class CLIPClassifier(Node):
             try:
                 sam_data = json.loads(sam_response.message)
                 self.get_logger().info(f"✅ SAM data parsed successfully")
+                
+                # Debug: Show SAM data structure
+                self.get_logger().debug(f"   SAM data keys: {list(sam_data.keys())}")
                 
                 if not sam_data.get('success', False):
                     response.success = False
@@ -373,65 +421,89 @@ class CLIPClassifier(Node):
                     return response
                 
                 # Extract bounding boxes from detection results
+                # SAM detector returns: {"success": true, "detections": [{"detections": [...], ...}]}
                 bboxes = []
-                if 'detections' in sam_data and len(sam_data['detections']) > 0:
-                    self.get_logger().info(f"📦 Found {len(sam_data['detections'])} detection sets")
-                    for detection_set in sam_data['detections']:
+                
+                self.get_logger().info("🔍 Searching for bounding boxes in SAM response...")
+                
+                # Check for 'output' field (from SAM schema)
+                if 'output' in sam_data:
+                    detections_list = sam_data['output'].get('detections', [])
+                    self.get_logger().info(f"📦 Found 'output' field with {len(detections_list)} detections")
+                    for idx, det in enumerate(detections_list):
+                        bbox = det.get('bbox')
+                        if bbox and len(bbox) == 4:
+                            self.get_logger().info(f"   ✓ Detection {idx}: bbox={bbox}")
+                            bboxes.append(bbox)
+                        else:
+                            self.get_logger().warn(f"   ✗ Detection {idx}: invalid bbox={bbox}")
+                            
+                # Fallback: Check for 'detections' field
+                elif 'detections' in sam_data and len(sam_data['detections']) > 0:
+                    self.get_logger().info(f"📦 Found 'detections' field with {len(sam_data['detections'])} detection sets")
+                    for set_idx, detection_set in enumerate(sam_data['detections']):
                         detections_list = detection_set.get('detections', [])
-                        self.get_logger().info(f"   Detection set has {len(detections_list)} detections")
-                        for det in detections_list:
+                        self.get_logger().info(f"   Set {set_idx}: {len(detections_list)} detections")
+                        for det_idx, det in enumerate(detections_list):
                             bbox = det.get('bbox')
                             if bbox and len(bbox) == 4:
+                                self.get_logger().info(f"      ✓ Detection {det_idx}: bbox={bbox}")
                                 bboxes.append(bbox)
-                                self.get_logger().debug(f"   Added bbox: {bbox}")
+                            else:
+                                self.get_logger().warn(f"      ✗ Detection {det_idx}: invalid bbox={bbox}")
                 else:
-                    self.get_logger().warn(f"⚠️ No detections found in SAM response")
-                    self.get_logger().debug(f"   SAM data keys: {sam_data.keys()}")
+                    self.get_logger().warn("⚠️ SAM response has neither 'output' nor 'detections' field")
+                    self.get_logger().info(f"   Available keys: {list(sam_data.keys())}")
                 
                 if not bboxes:
-                    # Log the SAM response structure for debugging
                     self.get_logger().warn("⚠️ No bounding boxes extracted from SAM response")
-                    self.get_logger().info(f"   SAM response structure: {json.dumps(sam_data, indent=2)[:500]}...")
+                    self.get_logger().info(f"   SAM response structure (first 500 chars): {json.dumps(sam_data, indent=2)[:500]}...")
                     
                     response.success = False
                     response.message = json.dumps({
                         "pipeline": "clip_with_detection",
                         "success": False,
                         "error": "No objects detected by SAM detector",
-                        "sam_response": sam_data,
+                        "hint": "Try adjusting camera position or ensure objects are visible in scene",
+                        "sam_response_sample": str(sam_data)[:300],
                         "timestamp": datetime.utcnow().isoformat() + "Z"
                     }, indent=2)
-                    self.get_logger().warn("⚠️ No objects detected - try adjusting camera or scene")
                     return response
                 
-                self.get_logger().info(f"✅ SAM detected {len(bboxes)} objects: {bboxes}")
+                self.get_logger().info("=" * 80)
+                self.get_logger().info(f"✅ SAM detected {len(bboxes)} objects with valid bounding boxes")
+                self.get_logger().info(f"   Bounding boxes: {bboxes}")
+                self.get_logger().info("=" * 80)
                 
             except json.JSONDecodeError as e:
-                self.get_logger().error(f"❌ Failed to parse SAM response as JSON")
-                self.get_logger().error(f"   Error: {e}")
-                self.get_logger().error(f"   Response message (first 500 chars): {sam_response.message[:500]}")
+                self.get_logger().error(f"❌ Failed to parse SAM response as JSON: {e}")
+                self.get_logger().error(f"   Response (first 300 chars): {sam_response.message[:300]}")
                 
                 response.success = False
                 response.message = json.dumps({
                     "pipeline": "clip_with_detection",
                     "success": False,
-                    "error": f"Failed to parse SAM response: {e}",
-                    "raw_response": sam_response.message[:500],
+                    "error": f"Failed to parse SAM response as JSON: {e}",
+                    "raw_response_sample": sam_response.message[:300],
                     "timestamp": datetime.utcnow().isoformat() + "Z"
                 }, indent=2)
                 return response
             
             # Step 2: Classify each detected region with CLIP
+            self.get_logger().info("=" * 80)
             self.get_logger().info(f"🔍 Step 2/2: Classifying {len(bboxes)} detected regions with CLIP...")
+            self.get_logger().info(f"📸 Using CAPTURED FRAME shape: {self.captured_frame.shape}")
+            self.get_logger().info("=" * 80)
             
-            classification_data = self._classify_regions(self.latest_rgb, bboxes)
+            classification_data = self._classify_regions(self.captured_frame, bboxes)
             self.latest_region_classifications = classification_data['output']['classified_regions']
             self.latest_classification = None  # Clear full image classification
             
             # Add SAM detection info to response
             classification_data['sam_detection'] = {
                 'total_detections': len(bboxes),
-                'bboxes': bboxes
+                'bboxes': bboxes,
+                'detection_time_ms': int((time.time() - timeout_start) * 1000)
             }
             
             response.success = True
@@ -666,15 +738,15 @@ class CLIPClassifier(Node):
     
     def visualization_callback(self):
         """Display camera feed with classification in OpenCV window"""
-        if self.latest_rgb is None:
+        if self.captured_frame is None:
             # Show waiting message
             blank = np.zeros((480, 640, 3), dtype=np.uint8)
             cv2.putText(
                 blank, 
-                "Waiting for /camera/image_raw...", 
-                (100, 240),
+                "Waiting to capture frame from /camera/image_raw...", 
+                (50, 240),
                 cv2.FONT_HERSHEY_SIMPLEX, 
-                1.0, 
+                0.8, 
                 (255, 255, 255), 
                 2
             )
@@ -682,8 +754,8 @@ class CLIPClassifier(Node):
             cv2.waitKey(1)
             return
         
-        # Create visualization image
-        vis_image = self.latest_rgb.copy()
+        # Create visualization image from captured frame
+        vis_image = self.captured_frame.copy()
         h, w = vis_image.shape[:2]
         
         # Check if we have region classifications (from classify_detect)

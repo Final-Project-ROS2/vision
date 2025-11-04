@@ -9,6 +9,8 @@ Usage:
     
 Service:
     ros2 service call /vision/detect_objects std_srvs/srv/Trigger
+
+
 """
 
 import rclpy
@@ -42,15 +44,17 @@ class SimpleSAMDetector(Node):
     def __init__(self, single_shot_mode=False):
         super().__init__('simple_sam_detector')
         
-        # Mode configuration
-        self.single_shot_mode = single_shot_mode
-        self.continuous_detection = not single_shot_mode
+        # Mode configuration - Default to single shot for faster service response
+        self.single_shot_mode = True  # Force single shot mode for service efficiency
+        self.continuous_detection = False
         
         # CV Bridge for ROS<->OpenCV conversion
         self.bridge = CvBridge()
         
         # Latest image from camera
         self.latest_rgb = None
+        self.captured_frame = None  # Single captured frame for detection
+        self.frame_captured = False
         self.latest_depth = None  # For distance estimation if available
         self.latest_detections = []
         self.frame_counter = 0
@@ -85,6 +89,13 @@ class SimpleSAMDetector(Node):
             self.detect_service_callback
         )
         
+        # Depth display service
+        self.depth_display_service = self.create_service(
+            Trigger,
+            '/vision/show_depth_image',
+            self.show_depth_callback
+        )
+        
         # OpenCV window setup
         self.window_name = "SAM Object Detection - /camera/image_raw"
         cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL)
@@ -93,16 +104,21 @@ class SimpleSAMDetector(Node):
         # Timer for continuous visualization (30 Hz)
         self.viz_timer = self.create_timer(0.033, self.visualization_callback)
         
-        mode_str = "SINGLE SHOT" if self.single_shot_mode else "CONTINUOUS"
-        self.get_logger().info(f"🚀 Simple SAM Detector Started [{mode_str} MODE]")
+        mode_str = "SERVICE-BASED (OPTIMIZED)"
+        self.get_logger().info("=" * 80)
+        self.get_logger().info(f"🚀 Simple SAM Detector Started [{mode_str}]")
+        self.get_logger().info("=" * 80)
         self.get_logger().info(f"📡 Subscribing to: /camera/image_raw")
-        self.get_logger().info(f"🔧 Service: /vision/detect_objects")
-        self.get_logger().info(f"👁️  OpenCV Window: '{self.window_name}'")
-        
-        if self.single_shot_mode:
-            self.get_logger().info("💡 Call service to detect: ros2 service call /vision/detect_objects std_srvs/srv/Trigger")
-        else:
-            self.get_logger().info("💡 Running continuous detection on every frame")
+        self.get_logger().info(f"📊 Subscribing to: /camera/depth/image_raw")
+        self.get_logger().info(f"🎯 Will capture ONE frame for efficient detection")
+        self.get_logger().info(f"� Service: /vision/detect_objects")
+        self.get_logger().info(f"� Service: /vision/show_depth_image")
+        self.get_logger().info(f"�👁️  OpenCV Window: '{self.window_name}'")
+        self.get_logger().info(f"⚡ Optimized: Only detects when service is called")
+        self.get_logger().info("=" * 80)
+        self.get_logger().info("💡 Call service: ros2 service call /vision/detect_objects std_srvs/srv/Trigger")
+        self.get_logger().info("💡 Show depth:   ros2 service call /vision/show_depth_image std_srvs/srv/Trigger")
+        self.get_logger().info("=" * 80)
     
     def rgb_callback(self, msg: Image):
         """Handle incoming RGB images from /camera/image_raw"""
@@ -111,7 +127,13 @@ class SimpleSAMDetector(Node):
             self.latest_rgb = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
             self.frame_counter += 1
             
-            # In continuous mode, detect on every frame
+            # Capture first frame for service-based detection
+            if not self.frame_captured:
+                self.captured_frame = self.latest_rgb.copy()
+                self.frame_captured = True
+                self.get_logger().info(f"📸 Captured frame {self.frame_counter} for detection")
+            
+            # In continuous mode, detect on every frame (disabled by default now)
             if self.continuous_detection:
                 self.latest_detections = self._detect_objects(self.latest_rgb)
                 
@@ -121,14 +143,26 @@ class SimpleSAMDetector(Node):
     def depth_callback(self, msg: Image):
         """Handle incoming depth images (optional, for distance estimation)"""
         try:
-            self.latest_depth = self.bridge.imgmsg_to_cv2(msg, desired_encoding='passthrough')
+            # Convert ROS Image to OpenCV format (float32 or uint16 depending on encoding)
+            depth_image = self.bridge.imgmsg_to_cv2(msg, desired_encoding='passthrough')
+            # Clip any invalid depths (NaN or Inf)
+            depth_image = np.nan_to_num(depth_image, nan=0.0, posinf=0.0, neginf=0.0)
+            self.latest_depth = depth_image
+            
+            # Log first successful depth capture
+            if not hasattr(self, '_depth_logged'):
+                self.get_logger().info(f"Depth image received: shape={depth_image.shape}, dtype={depth_image.dtype}")
+                self._depth_logged = True
         except Exception as e:
             self.get_logger().error(f"Failed to convert depth image: {e}")
     
     def detect_service_callback(self, request, response):
         """Service callback for /vision/detect_objects"""
         try:
-            if self.latest_rgb is None:
+            # Use captured frame instead of latest_rgb for consistency
+            frame_to_use = self.captured_frame if self.frame_captured else self.latest_rgb
+            
+            if frame_to_use is None:
                 response.success = False
                 response.message = json.dumps({
                     "success": False,
@@ -138,10 +172,13 @@ class SimpleSAMDetector(Node):
                 self.get_logger().warn("⚠️ No image received yet")
                 return response
             
-            self.get_logger().info("🔍 Running SAM detection...")
+            self.get_logger().info("=" * 80)
+            self.get_logger().info("🔍 Running SAM detection on captured frame...")
+            self.get_logger().info(f"   Frame shape: {frame_to_use.shape}")
+            self.get_logger().info("=" * 80)
             
-            # Run detection on current image
-            self.latest_detections = self._detect_objects(self.latest_rgb)
+            # Run detection on captured frame
+            self.latest_detections = self._detect_objects(frame_to_use)
             
             # Build JSON response in the requested schema
             detection_data = self._build_detection_schema()
@@ -149,16 +186,31 @@ class SimpleSAMDetector(Node):
             response.success = True
             response.message = json.dumps(detection_data, indent=2)
             
+            self.get_logger().info("=" * 80)
             self.get_logger().info(f"✅ Detection complete: {len(self.latest_detections)} objects found")
+            self.get_logger().info("=" * 80)
             
-            # Print detection details
+            # Print JSON output with bounding boxes
+            self.get_logger().info("📋 JSON OUTPUT (with bounding boxes):")
+            self.get_logger().info("=" * 80)
+            self.get_logger().info(response.message)
+            self.get_logger().info("=" * 80)
+            
+            # Print detection details in readable format
+            self.get_logger().info("📦 Bounding Boxes Summary:")
             for i, det in enumerate(self.latest_detections):
                 bbox = det['bbox']
                 distance = det.get('distance_cm', 'N/A')
                 self.get_logger().info(
-                    f"   {det['class_name']}: bbox={bbox}, "
+                    f"   [{i}] {det['class_name']}: bbox={bbox}, "
                     f"confidence={det['confidence']:.2f}, distance={distance}"
                 )
+            self.get_logger().info("=" * 80)
+            
+            # Verify bounding boxes are in output
+            bbox_count = len([d for d in detection_data.get('detections', [{}])[0].get('detections', []) if 'bbox' in d])
+            self.get_logger().info(f"✅ Verified: {bbox_count} bounding boxes included in JSON output")
+            self.get_logger().info("=" * 80)
             
         except Exception as e:
             response.success = False
@@ -168,6 +220,52 @@ class SimpleSAMDetector(Node):
                 "timestamp": datetime.utcnow().isoformat() + "Z"
             }, indent=2)
             self.get_logger().error(f"❌ Detection error: {e}")
+            import traceback
+            self.get_logger().error(traceback.format_exc())
+        
+        return response
+    
+    def show_depth_callback(self, request, response):
+        """Service callback for /vision/show_depth_image to display depth visualization"""
+        try:
+            if self.latest_depth is None:
+                response.success = False
+                response.message = "No depth image received yet from /camera/depth/image_raw."
+                self.get_logger().warn("⚠️ No depth image available")
+                return response
+            
+            # Normalize depth for visualization
+            normalized_depth = cv2.normalize(self.latest_depth, None, 0, 255, cv2.NORM_MINMAX)
+            depth_colormap = cv2.applyColorMap(normalized_depth.astype(np.uint8), cv2.COLORMAP_JET)
+            
+            # Create window if it doesn't exist
+            depth_window = "Depth Camera Image - /camera/depth/image_raw"
+            cv2.namedWindow(depth_window, cv2.WINDOW_NORMAL)
+            cv2.resizeWindow(depth_window, 800, 600)
+            
+            # Add info overlay
+            info_text = f"Depth Image | Shape: {self.latest_depth.shape}"
+            cv2.putText(
+                depth_colormap,
+                info_text,
+                (10, 30),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.7,
+                (255, 255, 255),
+                2
+            )
+            
+            cv2.imshow(depth_window, depth_colormap)
+            cv2.waitKey(1)  # Refresh window
+            
+            response.success = True
+            response.message = "Displayed latest depth image in OpenCV window."
+            self.get_logger().info(f"✅ Depth image displayed: {self.latest_depth.shape}")
+            
+        except Exception as e:
+            response.success = False
+            response.message = f"Error displaying depth image: {str(e)}"
+            self.get_logger().error(f"❌ Depth display error: {e}")
             import traceback
             self.get_logger().error(traceback.format_exc())
         
@@ -326,7 +424,10 @@ class SimpleSAMDetector(Node):
     
     def visualization_callback(self):
         """Display camera feed with detections in OpenCV window"""
-        if self.latest_rgb is None:
+        # Use captured frame if available, otherwise latest_rgb
+        frame_to_display = self.captured_frame if self.frame_captured else self.latest_rgb
+        
+        if frame_to_display is None:
             # Show waiting message
             blank = np.zeros((480, 640, 3), dtype=np.uint8)
             cv2.putText(
@@ -343,7 +444,7 @@ class SimpleSAMDetector(Node):
             return
         
         # Create visualization image
-        vis_image = self.latest_rgb.copy()
+        vis_image = frame_to_display.copy()
         
         # Draw detections
         for det in self.latest_detections:
