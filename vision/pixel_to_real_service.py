@@ -1,7 +1,7 @@
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import CameraInfo, Image
-from your_package.srv import PixelToReal
+from custom_interfaces.srv import PixelToReal
 
 import numpy as np
 from cv_bridge import CvBridge
@@ -11,7 +11,7 @@ class PixelToRealNode(Node):
         super().__init__('pixel_to_real_node')
 
         # Subscribers
-        self.create_subscription(CameraInfo, '/camera_info', self.camera_info_callback, 10)
+        self.create_subscription(CameraInfo, '/camera/camera_info', self.camera_info_callback, 10)
         self.create_subscription(Image, '/camera/depth/image_raw', self.depth_callback, 10)
 
         # Service
