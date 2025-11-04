@@ -66,6 +66,7 @@ setup(
             'test_services = scripts.test_services:main',
             'test_pipeline_images = scripts.test_pipeline_images:main',
             'integration_test = scripts.integration_test:main',
+            'pixel_to_real_service = vision.pixel_to_real_service:main',
         ],
     },
 )
