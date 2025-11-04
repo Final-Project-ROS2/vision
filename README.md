@@ -37,4 +37,29 @@ ros2 service call /toggle_continuous_display std_srvs/srv/Trigger
 - **Displays** with OpenCV `cv2.imshow()`
 - **Two modes**: single image on-demand or continuous feed
 
+
+
+**Set up Gazebo**
+```bash
+# Terminal 1
+colbon build
+```
+
+
+```bash
+# Terminal 2
+venv setup
+source install/setup.bash
+ros2 launch ur_yt_sim spawn_ur5_camera_gripper_moveit.launch.py 
+
+```
+
+/final_project_ws
+colcon build --packages-select vision --symlink-install
+
+/final_project_ws/src/vision
+source install/setup.bash && ros2 run vision clip_classifier
+
+
+
 **Note:** Requires X11 forwarding in WSL for display: `export DISPLAY=:0`
