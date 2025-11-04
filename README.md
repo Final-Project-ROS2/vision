@@ -48,7 +48,7 @@ colbon build
 
 ```bash
 # Terminal 2
-venv setup
+source venv/bin/activate
 source install/setup.bash
 ros2 launch ur_yt_sim spawn_ur5_camera_gripper_moveit.launch.py 
 
