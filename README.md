@@ -39,7 +39,7 @@ ros2 service call /toggle_continuous_display std_srvs/srv/Trigger
 
 
 
-**Set up Gazebo**
+## Set up Gazebo
 ```bash
 # Terminal 1
 colbon build
@@ -63,3 +63,57 @@ source install/setup.bash && ros2 run vision clip_classifier
 
 
 **Note:** Requires X11 forwarding in WSL for display: `export DISPLAY=:0`
+
+
+
+
+## All Sub and Pub Node 
+Run build 
+
+```bash
+cd ~/final_project_ws
+colcon build --packages-select vision
+source install/setup.bash
+```
+
+
+**[SAM ONLY]** - simple_sam_detector.py
+
+```bash
+#Terminal 1 Usage
+    ros2 run vision simple_sam_detector                    # Continuous mode
+    ros2 run vision simple_sam_detector --single           # Single shot mode
+
+#Terminal 2 Service
+   ros2 service call /vision/detect_objects std_srvs/srv/Trigger
+```
+**[CLIP ONLY]** - clip_classifier.py
+
+```bash
+# Terminal 1: SAM Detector
+ros2 run vision simple_sam_detector
+
+# Terminal 2: CLIP Classifier  
+ros2 run vision clip_classifier
+
+# Terminal 3: CLIP sevice Call
+ros2 service call /vision/classify_detect std_srvs/srv/Trigger
+```
+
+
+**[GRASP ONLY]** - graspnet_detection.py -> /camera/depth/image_raw
+
+```bash
+# Run GraspNet detector
+ros2 run vision graspnet_detector
+
+# Detect grasps (in another terminal)
+ros2 service call /vision/detect_grasps std_srvs/srv/Trigger
+```
+
+
+
+
+
+
+
