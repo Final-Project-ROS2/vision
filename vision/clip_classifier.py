@@ -6,9 +6,28 @@ Focused CLIP-based image classification from /camera/image_raw
 Usage:
     ros2 run vision clip_classifier
     ros2 run vision clip_classifier --labels "cat,dog,car,airplane"
+    python3 -m vision.clip_classifier
     
-Service:
-    ros2 service call /vision/classify_image std_srvs/srv/Trigger
+Services:
+    /vision/classify_all - Classify entire image
+        ros2 service call /vision/classify_all std_srvs/srv/Trigger
+    
+    /vision/classify_detect - Auto-detect objects with SAM, then classify each region
+        ros2 service call /vision/classify_detect std_srvs/srv/Trigger
+        Note: Requires simple_sam_detector to be running:
+              ros2 run vision simple_sam_detector
+
+
+# Terminal 1: SAM Detector
+ros2 run vision simple_sam_detector
+
+# Terminal 2: CLIP Classifier  
+ros2 run vision clip_classifier
+
+
+ros2 service call /vision/classify_detect std_srvs/srv/Trigger
+
+
 """
 
 import rclpy
@@ -25,15 +44,23 @@ from datetime import datetime
 from typing import List, Dict, Tuple
 import time
 
+# Import custom service (will be generated after build)
+try:
+    from vision.srv import ClassifyRegions
+    CUSTOM_SRV_AVAILABLE = True
+except ImportError:
+    CUSTOM_SRV_AVAILABLE = False
+    print("⚠️ Custom ClassifyRegions service not available. Build the package first.")
+
 # Try to import CLIP/transformers
 try:
     import torch
     from PIL import Image as PILImage
-    from transformers import CLIPProcessor, CLIPModel
+    from transformers import CLIPModel, AutoProcessor
     CLIP_AVAILABLE = True
 except ImportError:
     CLIP_AVAILABLE = False
-    print("⚠️ CLIP not available. Install: pip install torch transformers pillow")
+    print("CLIP not available. Install: pip install torch transformers pillow")
 
 
 class CLIPClassifier(Node):
@@ -44,10 +71,15 @@ class CLIPClassifier(Node):
         - /camera/image_raw (RGB images from Gazebo camera)
     
     Services:
-        - /vision/classify_image (Trigger classification with JSON output)
+        - /vision/classify_all (Classify entire image with JSON output)
+        - /vision/classify_detect (Auto-detect with SAM + classify regions)
+    
+    Service Clients:
+        - /vision/detect_objects (Calls SAM detector for object detection)
     
     Display:
         - Shows live camera feed with top prediction in OpenCV window
+        - Shows classified regions with labels when using classify_detect
     """
     
     def __init__(self, candidate_labels: List[str] = None):
@@ -55,8 +87,13 @@ class CLIPClassifier(Node):
         
         # Default labels if none provided
         self.candidate_labels = candidate_labels or [
-            "robot", "tool", "part", "container", "table", 
-            "box", "cube", "cylinder", "person", "hand"
+            "cobot",
+            "green_cube",
+            "drill",
+            "gear",
+            "monkey_wrench",
+            "piston_rod",
+            "washer"
         ]
         
         # CV Bridge for ROS<->OpenCV conversion
@@ -65,12 +102,16 @@ class CLIPClassifier(Node):
         # Latest image from camera
         self.latest_rgb = None
         self.latest_classification = None
+        self.latest_region_classifications = []  # For classify_detect
         self.frame_counter = 0
         
         # CLIP model
         self.model = None
         self.processor = None
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        
+        # Service client for SAM detector
+        self.sam_detector_client = None
         
         # QoS profile for image subscription
         self.image_qos = QoSProfile(
@@ -90,12 +131,29 @@ class CLIPClassifier(Node):
             self.image_qos
         )
         
-        # Classification service
-        self.classification_service = self.create_service(
+        # Classification services
+        self.classification_all_service = self.create_service(
             Trigger,
-            '/vision/classify_image',
-            self.classify_service_callback
+            '/vision/classify_all',
+            self.classify_all_callback
         )
+        
+        # Use Trigger service instead of custom ClassifyRegions
+        self.classification_detect_service = self.create_service(
+            Trigger,
+            '/vision/classify_detect',
+            self.classify_detect_callback
+        )
+        
+        # Create service client to call SAM detector
+        self.sam_detector_client = self.create_client(Trigger, '/vision/detect_objects')
+        
+        # Check if SAM detector service is available
+        self.get_logger().info("⏳ Waiting for /vision/detect_objects service...")
+        if self.sam_detector_client.wait_for_service(timeout_sec=20.0):
+            self.get_logger().info("✅ SAM detector service is ready!")
+        else:
+            self.get_logger().warn("⚠️ SAM detector service not available yet. Start with: ros2 run vision simple_sam_detector")
         
         # OpenCV window setup
         self.window_name = "CLIP Classifier - /camera/image_raw"
@@ -110,9 +168,12 @@ class CLIPClassifier(Node):
         self.get_logger().info(f"🤖 Model: openai/clip-vit-base-patch32")
         self.get_logger().info(f"🏷️  Labels: {', '.join(self.candidate_labels)}")
         self.get_logger().info(f"💻 Device: {self.device}")
-        self.get_logger().info(f"🔧 Service: /vision/classify_image")
+        self.get_logger().info(f"🔧 Service: /vision/classify_all (classify entire image)")
+        self.get_logger().info(f"🔧 Service: /vision/classify_detect (auto-detect + classify)")
+        self.get_logger().info(f"   └─ Calls /vision/detect_objects → needs: ros2 run vision simple_sam_detector")
         self.get_logger().info(f"👁️  OpenCV Window: '{self.window_name}'")
-        self.get_logger().info("💡 Call service: ros2 service call /vision/classify_image std_srvs/srv/Trigger")
+        self.get_logger().info("💡 Usage: ros2 service call /vision/classify_all std_srvs/srv/Trigger")
+        self.get_logger().info("💡 Usage: ros2 service call /vision/classify_detect std_srvs/srv/Trigger")
     
     def _init_clip_model(self):
         """Initialize CLIP model"""
@@ -125,7 +186,7 @@ class CLIPClassifier(Node):
             model_name = "openai/clip-vit-base-patch32"
             
             self.model = CLIPModel.from_pretrained(model_name).to(self.device)
-            self.processor = CLIPProcessor.from_pretrained(model_name)
+            self.processor = AutoProcessor.from_pretrained(model_name)
             
             self.model.eval()  # Set to evaluation mode
             
@@ -146,8 +207,8 @@ class CLIPClassifier(Node):
         except Exception as e:
             self.get_logger().error(f"Failed to convert image: {e}")
     
-    def classify_service_callback(self, request, response):
-        """Service callback for /vision/classify_image"""
+    def classify_all_callback(self, request, response):
+        """Service callback for /vision/classify_all - classify entire image"""
         try:
             if self.latest_rgb is None:
                 response.success = False
@@ -171,11 +232,12 @@ class CLIPClassifier(Node):
                 self.get_logger().error("❌ CLIP model not available")
                 return response
             
-            self.get_logger().info("🔍 Running CLIP classification...")
+            self.get_logger().info("🔍 Running CLIP classification on entire image...")
             
             # Run classification
             classification_data = self._classify_image(self.latest_rgb)
             self.latest_classification = classification_data
+            self.latest_region_classifications = []  # Clear region classifications
             
             response.success = True
             response.message = json.dumps(classification_data, indent=2)
@@ -190,6 +252,206 @@ class CLIPClassifier(Node):
             response.success = False
             response.message = json.dumps({
                 "pipeline": "single_clip",
+                "success": False,
+                "error": str(e),
+                "timestamp": datetime.utcnow().isoformat() + "Z"
+            }, indent=2)
+            self.get_logger().error(f"❌ Classification error: {e}")
+            import traceback
+            self.get_logger().error(traceback.format_exc())
+        
+        return response
+    
+    def classify_detect_callback(self, request, response):
+        """Service callback for /vision/classify_detect - detect objects then classify regions"""
+        try:
+            if self.latest_rgb is None:
+                response.success = False
+                response.message = json.dumps({
+                    "pipeline": "clip_with_detection",
+                    "success": False,
+                    "error": "No image available from /camera/image_raw",
+                    "timestamp": datetime.utcnow().isoformat() + "Z"
+                }, indent=2)
+                self.get_logger().warn("⚠️ No image received yet")
+                return response
+            
+            if not CLIP_AVAILABLE or self.model is None:
+                response.success = False
+                response.message = json.dumps({
+                    "pipeline": "clip_with_detection",
+                    "success": False,
+                    "error": "CLIP model not available",
+                    "timestamp": datetime.utcnow().isoformat() + "Z"
+                }, indent=2)
+                self.get_logger().error("❌ CLIP model not available")
+                return response
+            
+            # Step 1: Call SAM detector to get bounding boxes
+            self.get_logger().info("🔍 Step 1/2: Calling /vision/detect_objects service...")
+            
+            # Wait for SAM detector service with longer timeout
+            if not self.sam_detector_client.wait_for_service(timeout_sec=5.0):
+                response.success = False
+                response.message = json.dumps({
+                    "pipeline": "clip_with_detection",
+                    "success": False,
+                    "error": "SAM detector service /vision/detect_objects not available. Run: ros2 run vision simple_sam_detector",
+                    "timestamp": datetime.utcnow().isoformat() + "Z"
+                }, indent=2)
+                self.get_logger().error("❌ /vision/detect_objects service not available")
+                self.get_logger().error("   Make sure SAM detector is running: ros2 run vision simple_sam_detector")
+                return response
+            
+            self.get_logger().info("✅ SAM detector service found, sending request...")
+            
+            # Call SAM detector
+            sam_request = Trigger.Request()
+            sam_future = self.sam_detector_client.call_async(sam_request)
+            
+            self.get_logger().info("⏳ Waiting for SAM detection to complete...")
+            
+            # Wait for response with longer timeout (30 seconds for heavy processing)
+            timeout_start = time.time()
+            timeout_duration = 30.0
+            
+            while not sam_future.done() and (time.time() - timeout_start) < timeout_duration:
+                rclpy.spin_once(self, timeout_sec=0.1)
+            
+            if not sam_future.done():
+                response.success = False
+                response.message = json.dumps({
+                    "pipeline": "clip_with_detection",
+                    "success": False,
+                    "error": f"SAM detection timeout after {timeout_duration} seconds. Check if simple_sam_detector is processing images.",
+                    "timestamp": datetime.utcnow().isoformat() + "Z"
+                }, indent=2)
+                self.get_logger().error(f"❌ SAM detection timeout after {timeout_duration}s")
+                self.get_logger().error("   Check if SAM detector is receiving /camera/image_raw")
+                return response
+            
+            try:
+                sam_response = sam_future.result()
+            except Exception as e:
+                response.success = False
+                response.message = json.dumps({
+                    "pipeline": "clip_with_detection",
+                    "success": False,
+                    "error": f"Failed to get SAM response: {str(e)}",
+                    "timestamp": datetime.utcnow().isoformat() + "Z"
+                }, indent=2)
+                self.get_logger().error(f"❌ Failed to get SAM response: {e}")
+                return response
+            
+            self.get_logger().info(f"✅ SAM response received (success={sam_response.success})")
+            
+            if not sam_response.success:
+                response.success = False
+                response.message = json.dumps({
+                    "pipeline": "clip_with_detection",
+                    "success": False,
+                    "error": f"SAM detection failed: {sam_response.message}",
+                    "timestamp": datetime.utcnow().isoformat() + "Z"
+                }, indent=2)
+                self.get_logger().error(f"❌ SAM detection failed: {sam_response.message}")
+                return response
+            
+            # Parse SAM detection results
+            self.get_logger().info("📋 Parsing SAM detection results...")
+            try:
+                sam_data = json.loads(sam_response.message)
+                self.get_logger().info(f"✅ SAM data parsed successfully")
+                
+                if not sam_data.get('success', False):
+                    response.success = False
+                    response.message = json.dumps({
+                        "pipeline": "clip_with_detection",
+                        "success": False,
+                        "error": f"SAM detection unsuccessful: {sam_data.get('error', 'Unknown error')}",
+                        "timestamp": datetime.utcnow().isoformat() + "Z"
+                    }, indent=2)
+                    return response
+                
+                # Extract bounding boxes from detection results
+                bboxes = []
+                if 'detections' in sam_data and len(sam_data['detections']) > 0:
+                    self.get_logger().info(f"📦 Found {len(sam_data['detections'])} detection sets")
+                    for detection_set in sam_data['detections']:
+                        detections_list = detection_set.get('detections', [])
+                        self.get_logger().info(f"   Detection set has {len(detections_list)} detections")
+                        for det in detections_list:
+                            bbox = det.get('bbox')
+                            if bbox and len(bbox) == 4:
+                                bboxes.append(bbox)
+                                self.get_logger().debug(f"   Added bbox: {bbox}")
+                else:
+                    self.get_logger().warn(f"⚠️ No detections found in SAM response")
+                    self.get_logger().debug(f"   SAM data keys: {sam_data.keys()}")
+                
+                if not bboxes:
+                    # Log the SAM response structure for debugging
+                    self.get_logger().warn("⚠️ No bounding boxes extracted from SAM response")
+                    self.get_logger().info(f"   SAM response structure: {json.dumps(sam_data, indent=2)[:500]}...")
+                    
+                    response.success = False
+                    response.message = json.dumps({
+                        "pipeline": "clip_with_detection",
+                        "success": False,
+                        "error": "No objects detected by SAM detector",
+                        "sam_response": sam_data,
+                        "timestamp": datetime.utcnow().isoformat() + "Z"
+                    }, indent=2)
+                    self.get_logger().warn("⚠️ No objects detected - try adjusting camera or scene")
+                    return response
+                
+                self.get_logger().info(f"✅ SAM detected {len(bboxes)} objects: {bboxes}")
+                
+            except json.JSONDecodeError as e:
+                self.get_logger().error(f"❌ Failed to parse SAM response as JSON")
+                self.get_logger().error(f"   Error: {e}")
+                self.get_logger().error(f"   Response message (first 500 chars): {sam_response.message[:500]}")
+                
+                response.success = False
+                response.message = json.dumps({
+                    "pipeline": "clip_with_detection",
+                    "success": False,
+                    "error": f"Failed to parse SAM response: {e}",
+                    "raw_response": sam_response.message[:500],
+                    "timestamp": datetime.utcnow().isoformat() + "Z"
+                }, indent=2)
+                return response
+            
+            # Step 2: Classify each detected region with CLIP
+            self.get_logger().info(f"🔍 Step 2/2: Classifying {len(bboxes)} detected regions with CLIP...")
+            
+            classification_data = self._classify_regions(self.latest_rgb, bboxes)
+            self.latest_region_classifications = classification_data['output']['classified_regions']
+            self.latest_classification = None  # Clear full image classification
+            
+            # Add SAM detection info to response
+            classification_data['sam_detection'] = {
+                'total_detections': len(bboxes),
+                'bboxes': bboxes
+            }
+            
+            response.success = True
+            response.message = json.dumps(classification_data, indent=2)
+            
+            self.get_logger().info(f"✅ Pipeline complete: {len(bboxes)} regions detected and classified")
+            
+            # Log each region's top prediction
+            for region in classification_data['output']['classified_regions']:
+                top_pred = region['top_prediction']
+                bbox = region['bbox']
+                self.get_logger().info(
+                    f"   Region {region['region_id']} {bbox}: {top_pred['label']} "
+                    f"(confidence: {top_pred['confidence']:.2f})"
+                )
+            
+        except Exception as e:
+            response.success = False
+            response.message = json.dumps({
+                "pipeline": "clip_with_detection",
                 "success": False,
                 "error": str(e),
                 "timestamp": datetime.utcnow().isoformat() + "Z"
@@ -297,6 +559,111 @@ class CLIPClassifier(Node):
         
         return schema
     
+    def _classify_regions(self, rgb_image: np.ndarray, bboxes: List[List[int]]) -> Dict:
+        """
+        Classify multiple image regions using CLIP model
+        
+        Args:
+            rgb_image: BGR image from OpenCV
+            bboxes: List of bounding boxes [[x1, y1, x2, y2], ...]
+            
+        Returns:
+            Dictionary with classification results for each region
+        """
+        start_time = time.time()
+        
+        classified_regions = []
+        
+        for region_id, bbox in enumerate(bboxes):
+            x1, y1, x2, y2 = bbox
+            
+            # Clamp bbox to image bounds
+            h, w = rgb_image.shape[:2]
+            x1 = max(0, min(x1, w))
+            x2 = max(0, min(x2, w))
+            y1 = max(0, min(y1, h))
+            y2 = max(0, min(y2, h))
+            
+            # Skip invalid boxes
+            if x2 <= x1 or y2 <= y1:
+                self.get_logger().warn(f"⚠️ Skipping invalid bbox: {bbox}")
+                continue
+            
+            # Crop region
+            region_bgr = rgb_image[y1:y2, x1:x2]
+            
+            # Convert BGR to RGB
+            region_rgb = cv2.cvtColor(region_bgr, cv2.COLOR_BGR2RGB)
+            pil_image = PILImage.fromarray(region_rgb)
+            
+            # Prepare inputs
+            inputs = self.processor(
+                text=self.candidate_labels,
+                images=pil_image,
+                return_tensors="pt",
+                padding=True
+            ).to(self.device)
+            
+            # Get predictions
+            with torch.no_grad():
+                outputs = self.model(**inputs)
+                logits_per_image = outputs.logits_per_image
+                probs = logits_per_image.softmax(dim=1)[0]
+            
+            # Convert to numpy
+            probs_np = probs.cpu().numpy()
+            
+            # Sort predictions by confidence
+            sorted_indices = np.argsort(probs_np)[::-1]
+            
+            # Build predictions list
+            all_predictions = []
+            for idx in sorted_indices:
+                all_predictions.append({
+                    "label": self.candidate_labels[idx],
+                    "confidence": round(float(probs_np[idx]), 2)
+                })
+            
+            # Build region result
+            region_result = {
+                "region_id": region_id,
+                "bbox": [int(x1), int(y1), int(x2), int(y2)],
+                "top_prediction": {
+                    "label": all_predictions[0]["label"],
+                    "confidence": all_predictions[0]["confidence"]
+                },
+                "all_predictions": all_predictions[:10]  # Top 10
+            }
+            
+            classified_regions.append(region_result)
+        
+        # Calculate processing time
+        processing_time_ms = int((time.time() - start_time) * 1000)
+        
+        # Build JSON schema
+        schema = {
+            "pipeline": "clip_with_detection",
+            "model": "openai/clip-vit-base-patch32",
+            "input": {
+                "image_path": f"frame_{self.frame_counter:06d}",
+                "num_regions": len(bboxes),
+                "candidate_labels": self.candidate_labels
+            },
+            "output": {
+                "classified_regions": classified_regions,
+                "summary": {
+                    "total_regions": len(classified_regions),
+                    "processing_time_ms": processing_time_ms
+                },
+                "metadata": {
+                    "timestamp": datetime.utcnow().isoformat() + "Z",
+                    "device": self.device
+                }
+            }
+        }
+        
+        return schema
+    
     def visualization_callback(self):
         """Display camera feed with classification in OpenCV window"""
         if self.latest_rgb is None:
@@ -319,10 +686,77 @@ class CLIPClassifier(Node):
         vis_image = self.latest_rgb.copy()
         h, w = vis_image.shape[:2]
         
-        # Draw classification overlay
-        if self.latest_classification:
+        # Check if we have region classifications (from classify_detect)
+        if self.latest_region_classifications:
+            # Draw each classified region with bounding box and label
+            for region in self.latest_region_classifications:
+                bbox = region['bbox']
+                top_pred = region['top_prediction']
+                region_id = region['region_id']
+                
+                # Draw bounding box
+                cv2.rectangle(
+                    vis_image,
+                    (bbox[0], bbox[1]),
+                    (bbox[2], bbox[3]),
+                    (0, 255, 255),  # Yellow for classified regions
+                    3
+                )
+                
+                # Prepare label text
+                label = f"#{region_id}: {top_pred['label']}"
+                conf = f"{top_pred['confidence']:.1%}"
+                
+                # Calculate label position (above bbox)
+                label_size, _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)
+                
+                # Draw label background
+                cv2.rectangle(
+                    vis_image,
+                    (bbox[0], bbox[1] - label_size[1] - 25),
+                    (bbox[0] + max(label_size[0], 100), bbox[1]),
+                    (0, 255, 255),
+                    -1
+                )
+                
+                # Draw label text
+                cv2.putText(
+                    vis_image,
+                    label,
+                    (bbox[0] + 5, bbox[1] - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.7,
+                    (0, 0, 0),
+                    2
+                )
+                
+                # Draw confidence
+                cv2.putText(
+                    vis_image,
+                    conf,
+                    (bbox[0] + 5, bbox[1] - 30),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.6,
+                    (0, 0, 0),
+                    2
+                )
+            
+            # Add info text
+            info_text = f"Classified Regions: {len(self.latest_region_classifications)}"
+            cv2.putText(
+                vis_image,
+                info_text,
+                (10, 30),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.8,
+                (0, 255, 255),
+                2
+            )
+            
+        # Draw full image classification overlay (if available and no regions)
+        elif self.latest_classification:
             top_pred = self.latest_classification['output']['top_prediction']
-            all_preds = self.latest_classification['output']['all_predictions'][:3]  # Top 3
+            all_preds = self.latest_classification['output']['all_predictions'][:5]  # Top 5
             
             # Draw semi-transparent overlay at bottom
             overlay = vis_image.copy()
@@ -353,7 +787,7 @@ class CLIPClassifier(Node):
                 2
             )
             
-            # Draw top 3 predictions (smaller, on right)
+            # Draw top 5 predictions (smaller, on right)
             y_offset = h - 120
             for i, pred in enumerate(all_preds):
                 text = f"{i+1}. {pred['label']}: {pred['confidence']:.1%}"
@@ -370,7 +804,7 @@ class CLIPClassifier(Node):
             # Show "Call service to classify" message
             cv2.putText(
                 vis_image,
-                "Call /vision/classify_image to classify",
+                "Call /vision/classify_all or /vision/classify_detect",
                 (20, h-30),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.7,
@@ -385,8 +819,8 @@ class CLIPClassifier(Node):
             (10, 30),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.7,
-            (255, 255, 255),
-            2
+            (0, 0, 0),
+            4
         )
         
         cv2.putText(
@@ -395,8 +829,8 @@ class CLIPClassifier(Node):
             (10, 30),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.7,
-            (0, 0, 0),
-            4
+            (255, 255, 255),
+            2
         )
         
         # Show image

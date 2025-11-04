@@ -60,14 +60,14 @@ def main():
         
         if data and data.get('success'):
             print("\n" + "="*60)
-            print("📊 DETECTION RESULTS")
+            print("DETECTION RESULTS")
             print("="*60)
             
             # Print formatted JSON
             print(json.dumps(data, indent=2))
             
             print("\n" + "="*60)
-            print("📋 SUMMARY")
+            print("SUMMARY")
             print("="*60)
             
             # Extract key info
@@ -83,7 +83,7 @@ def main():
             detections = data.get('detections', [])
             if detections:
                 print("\n" + "="*60)
-                print("🎯 DETECTED OBJECTS")
+                print("DETECTED OBJECTS")
                 print("="*60)
                 
                 for frame in detections:
@@ -99,11 +99,11 @@ def main():
                             print(f"    Distance: {det['distance_cm']:.1f} cm")
             
             print("\n" + "="*60)
-            print("✅ Parsing complete!")
+            print("Parsing complete!")
             print("="*60 + "\n")
             
         else:
-            print("\n❌ Detection failed or returned no data\n")
+            print("\n Detection failed or returned no data\n")
             if data:
                 print(json.dumps(data, indent=2))
     
