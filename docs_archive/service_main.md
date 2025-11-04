@@ -4,7 +4,7 @@
 
 The vision system provides **two workflows** for robotic vision:
 
-1. **🖼️ Static Image Pipeline** - Process existing images from files
+1. **🖼️ Static Image Pipeline** - Process existing images from files or external camera nodes
 2. **📹 Webcam Pipeline** - Capture and process live webcam images
 
 Both workflows use the same **4-stage vision pipeline**:
@@ -43,7 +43,7 @@ Both workflows use the same **4-stage vision pipeline**:
 ```
 ┌─────────────────┐
 │    Webcam       │
-│   /dev/video0   │
+│   /dev/video
 └────────┬────────┘
          │
          ↓
@@ -83,6 +83,9 @@ First, ensure you have a node publishing images to `/camera/image_raw`. This cou
 ```bash
 # Terminal 1: Start RGB viewer (subscribes to /camera/image_raw)
 ros2 run vision show_rgb_image
+
+ros2 run vision sam_vision_pipeline
+
 ```
 
 **Expected Output:**
