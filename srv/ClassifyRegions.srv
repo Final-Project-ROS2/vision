@@ -1,8 +1,0 @@
-# Request: List of bounding boxes to classify
-# Each bbox is [x1, y1, x2, y2] format
-int32[] bboxes  # Flattened array: [x1,y1,x2,y2, x1,y1,x2,y2, ...]
-int32 num_boxes  # Number of bounding boxes (length of bboxes / 4)
----
-# Response: Classification results in JSON format
-bool success
-string message  # JSON string with classification results

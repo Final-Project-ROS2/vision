@@ -17,6 +17,8 @@ Services:
         Note: Requires simple_sam_detector to be running:
               ros2 run vision simple_sam_detector
 
+// image vector embbeing fk this shit
+
 
 # Terminal 1: SAM Detector
 ros2 run vision simple_sam_detector
@@ -74,6 +76,14 @@ except ImportError:
     CLIP_AVAILABLE = False
     print("CLIP not available. Install: pip install torch transformers pillow")
 
+# Try to import SAM custom messages (fallback to placeholder if not built yet)
+try:
+    from vision.msg import SAMDetections, SAMDetection  # type: ignore
+    SAM_MSGS_AVAILABLE = True
+except ImportError:
+    SAM_MSGS_AVAILABLE = False
+    # We'll subscribe to placeholder Image messages instead
+
 
 class CLIPClassifier(Node):
     """
@@ -126,6 +136,7 @@ class CLIPClassifier(Node):
         
         # Service client for SAM detector
         self.sam_detector_client = None
+        self.sam_sub = None
         
         # QoS profile for image subscription
         self.image_qos = QoSProfile(
@@ -161,6 +172,25 @@ class CLIPClassifier(Node):
         
         # Create service client to call SAM detector
         self.sam_detector_client = self.create_client(Trigger, '/vision/detect_objects')
+
+        # Also subscribe to live SAM detections so CLIP reacts when SAM publishes
+        if SAM_MSGS_AVAILABLE:
+            self.sam_sub = self.create_subscription(
+                SAMDetections,
+                '/vision/sam_detections',
+                self.sam_detections_callback,
+                10
+            )
+            self.get_logger().info("👂 Subscribing to: /vision/sam_detections (SAMDetections)")
+        else:
+            # Fallback: placeholder Image publisher used by simple_sam_detector before custom msgs are built
+            self.sam_sub = self.create_subscription(
+                Image,
+                '/vision/sam_detections',
+                self.sam_detections_placeholder_callback,
+                10
+            )
+            self.get_logger().warn("👂 Subscribing to: /vision/sam_detections (placeholder Image). Build msgs for full integration.")
         
         # Check if SAM detector service is available
         self.get_logger().info("⏳ Waiting for /vision/detect_objects service...")
@@ -188,6 +218,7 @@ class CLIPClassifier(Node):
         self.get_logger().info(f"👁️  OpenCV Window: '{self.window_name}'")
         self.get_logger().info("💡 Usage: ros2 service call /vision/classify_all std_srvs/srv/Trigger")
         self.get_logger().info("💡 Usage: ros2 service call /vision/classify_detect std_srvs/srv/Trigger")
+        self.get_logger().info("🔌 Live link: reacts to /vision/sam_detections by classifying regions automatically")
     
     def _init_clip_model(self):
         """Initialize CLIP model"""
@@ -281,6 +312,54 @@ class CLIPClassifier(Node):
             self.get_logger().error(traceback.format_exc())
         
         return response
+
+    def sam_detections_callback(self, msg: 'SAMDetections'):
+        """Handle incoming SAM detections and classify regions automatically.
+
+        This lets the CLIP node consume the SAM pipeline without needing to call the service.
+        """
+        try:
+            if not CLIP_AVAILABLE or self.model is None:
+                self.get_logger().warn("CLIP model not available yet; ignoring SAM detections")
+                return
+            if self.captured_frame is None:
+                self.get_logger().warn("No captured frame available; waiting for /camera/image_raw")
+                return
+
+            # Extract bboxes from SAMDetections
+            bboxes: List[List[int]] = []
+            for det in msg.detections:
+                bbox = list(det.bbox)
+                if len(bbox) == 4:
+                    bboxes.append([int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3])])
+
+            if not bboxes:
+                self.get_logger().warn("SAM detections message has no valid bounding boxes")
+                return
+
+            self.get_logger().info(f"🧩 Received {len(bboxes)} SAM regions → classifying with CLIP…")
+            classification_data = self._classify_regions(self.captured_frame, bboxes)
+            self.latest_region_classifications = classification_data['output']['classified_regions']
+            self.latest_classification = None
+        except Exception as e:
+            self.get_logger().error(f"Error handling SAM detections: {e}")
+            import traceback
+            self.get_logger().error(traceback.format_exc())
+
+    def sam_detections_placeholder_callback(self, msg: Image):
+        """Handle placeholder /vision/sam_detections messages (Image) from SimpleSAM.
+
+        The placeholder encodes only counts; we can't get bboxes, so just log and wait
+        for the service-based integration or rebuilt messages.
+        """
+        try:
+            # The simple_sam_detector encodes counts in height/width for visibility only
+            self.get_logger().info(
+                f"📨 Placeholder SAM detections received: count_hint={msg.height}, frame={msg.width}"
+            )
+            self.get_logger().info("Build custom messages to enable auto-classification from topic events.")
+        except Exception as e:
+            self.get_logger().error(f"Error handling placeholder SAM detections: {e}")
     
     def classify_detect_callback(self, request, response):
         """Service callback for /vision/classify_detect - detect objects then classify regions"""

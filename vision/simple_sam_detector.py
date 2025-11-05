@@ -1,28 +1,31 @@
 #!/usr/bin/env python3
 """
 Simple SAM Vision Detection Node
-Focuses only on /camera/image_raw with OpenCV detection and visualization
+
+Provides object detection and segmentation using OpenCV-based methods.
+Subscribes to camera topics and provides detection services.
 
 Usage:
-    ros2 run vision simple_sam_detector                    # Continuous mode
-    ros2 run vision simple_sam_detector --single           # Single shot mode
+    ros2 run vision simple_sam_detector
     
 Service:
     ros2 service call /vision/detect_objects std_srvs/srv/Trigger
-
-
 """
 
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy
+from custom_interfaces.msg import SAMDetections 
 from sensor_msgs.msg import Image
 from std_srvs.srv import Trigger
+from std_msgs.msg import Header
+from std_msgs.msg import String
 from cv_bridge import CvBridge
 import cv2
 import numpy as np
 import sys
 import json
+import os
 from datetime import datetime
 from typing import List, Dict, Tuple
 
@@ -33,9 +36,14 @@ class SimpleSAMDetector(Node):
     
     Subscribes to:
         - /camera/image_raw (RGB images from Gazebo camera)
+        - /camera/depth/image_raw (Depth images for distance estimation)
+    
+    Publishes:
+        - /vision/sam_detections (SAMDetections message with all detections)
     
     Services:
         - /vision/detect_objects (Trigger detection on current image)
+        - /vision/show_depth_image (Display depth visualization)
     
     Display:
         - Shows live camera feed with detections in OpenCV window
@@ -74,7 +82,7 @@ class SimpleSAMDetector(Node):
             self.image_qos
         )
         
-        # Subscribe to depth (optional for distance estimation)
+        # Subscribe to depth  (for Graspnet)
         self.depth_sub = self.create_subscription(
             Image,
             '/camera/depth/image_raw',
@@ -96,6 +104,24 @@ class SimpleSAMDetector(Node):
             self.show_depth_callback
         )
         
+        # Publisher for detection results
+        self.detection_publisher = self.create_publisher(
+            SAMDetections,  # Placeholder - will be SAMDetections after build
+            '/vision/sam_detections',
+            10
+        )
+        self.get_logger().info("Publisher: /vision/sam_detections (SAMDetections)")
+
+        # Status/heartbeat publisher to ensure global visibility and easy debugging
+        self.status_publisher = self.create_publisher(
+            String,
+            '/vision/status',
+            10
+        )
+
+        # Record a start time for status messages
+        self._node_start_time = self.get_clock().now()
+        
         # OpenCV window setup
         self.window_name = "SAM Object Detection - /camera/image_raw"
         cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL)
@@ -106,19 +132,25 @@ class SimpleSAMDetector(Node):
         
         mode_str = "SERVICE-BASED (OPTIMIZED)"
         self.get_logger().info("=" * 80)
-        self.get_logger().info(f"🚀 Simple SAM Detector Started [{mode_str}]")
+        self.get_logger().info(f"Simple SAM Detector Started [{mode_str}]")
         self.get_logger().info("=" * 80)
-        self.get_logger().info(f"📡 Subscribing to: /camera/image_raw")
-        self.get_logger().info(f"📊 Subscribing to: /camera/depth/image_raw")
-        self.get_logger().info(f"🎯 Will capture ONE frame for efficient detection")
-        self.get_logger().info(f"� Service: /vision/detect_objects")
-        self.get_logger().info(f"� Service: /vision/show_depth_image")
-        self.get_logger().info(f"�👁️  OpenCV Window: '{self.window_name}'")
-        self.get_logger().info(f"⚡ Optimized: Only detects when service is called")
+        self.get_logger().info(f"Subscribing to: /camera/image_raw")
+        self.get_logger().info(f"Subscribing to: /camera/depth/image_raw")
+        self.get_logger().info(f"Will capture ONE frame for efficient detection")
+        self.get_logger().info(f"Service: /vision/detect_objects")
+        self.get_logger().info(f"Service: /vision/show_depth_image")
+        self.get_logger().info(f"Publisher: /vision/sam_detections")
+        self.get_logger().info(f"OpenCV Window: '{self.window_name}'")
+        self.get_logger().info(f"Optimized: Only detects when service is called")
         self.get_logger().info("=" * 80)
-        self.get_logger().info("💡 Call service: ros2 service call /vision/detect_objects std_srvs/srv/Trigger")
-        self.get_logger().info("💡 Show depth:   ros2 service call /vision/show_depth_image std_srvs/srv/Trigger")
+        self.get_logger().info("Call service: ros2 service call /vision/detect_objects std_srvs/srv/Trigger")
+        self.get_logger().info("Show depth:   ros2 service call /vision/show_depth_image std_srvs/srv/Trigger")
         self.get_logger().info("=" * 80)
+
+        # Announce presence shortly after start so topics appear in `ros2 topic list`
+        # and keep advertising status periodicallyh so the `/vision/*` namespace is visible.
+        self._startup_timer = self.create_timer(0.5, self._startup_announce)
+        self._heartbeat_timer = self.create_timer(5.0, self._heartbeat_callback)
     
     def rgb_callback(self, msg: Image):
         """Handle incoming RGB images from /camera/image_raw"""
@@ -127,11 +159,10 @@ class SimpleSAMDetector(Node):
             self.latest_rgb = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
             self.frame_counter += 1
             
-            # Capture first frame for service-based detection
             if not self.frame_captured:
                 self.captured_frame = self.latest_rgb.copy()
                 self.frame_captured = True
-                self.get_logger().info(f"📸 Captured frame {self.frame_counter} for detection")
+                self.get_logger().info(f"Captured frame {self.frame_counter} for detection")
             
             # In continuous mode, detect on every frame (disabled by default now)
             if self.continuous_detection:
@@ -139,6 +170,8 @@ class SimpleSAMDetector(Node):
                 
         except Exception as e:
             self.get_logger().error(f"Failed to convert image: {e}")
+
+    # (Timers started in __init__)        
     
     def depth_callback(self, msg: Image):
         """Handle incoming depth images (optional, for distance estimation)"""
@@ -169,12 +202,12 @@ class SimpleSAMDetector(Node):
                     "error": "No image available from /camera/image_raw",
                     "timestamp": datetime.utcnow().isoformat() + "Z"
                 }, indent=2)
-                self.get_logger().warn("⚠️ No image received yet")
+                self.get_logger().warn("No image received yet")
                 return response
             
             self.get_logger().info("=" * 80)
-            self.get_logger().info("🔍 Running SAM detection on captured frame...")
-            self.get_logger().info(f"   Frame shape: {frame_to_use.shape}")
+            self.get_logger().info("Running SAM detection on captured frame...")
+            self.get_logger().info(f"Frame shape: {frame_to_use.shape}")
             self.get_logger().info("=" * 80)
             
             # Run detection on captured frame
@@ -183,21 +216,24 @@ class SimpleSAMDetector(Node):
             # Build JSON response in the requested schema
             detection_data = self._build_detection_schema()
             
+            # Publish detections as ROS2 message
+            self._publish_detections_ros()
+            
             response.success = True
             response.message = json.dumps(detection_data, indent=2)
             
             self.get_logger().info("=" * 80)
-            self.get_logger().info(f"✅ Detection complete: {len(self.latest_detections)} objects found")
+            self.get_logger().info(f"Detection complete: {len(self.latest_detections)} objects found")
             self.get_logger().info("=" * 80)
             
             # Print JSON output with bounding boxes
-            self.get_logger().info("📋 JSON OUTPUT (with bounding boxes):")
+            self.get_logger().info("JSON OUTPUT (with bounding boxes):")
             self.get_logger().info("=" * 80)
             self.get_logger().info(response.message)
             self.get_logger().info("=" * 80)
             
             # Print detection details in readable format
-            self.get_logger().info("📦 Bounding Boxes Summary:")
+            self.get_logger().info("Bounding Boxes Summary:")
             for i, det in enumerate(self.latest_detections):
                 bbox = det['bbox']
                 distance = det.get('distance_cm', 'N/A')
@@ -209,7 +245,7 @@ class SimpleSAMDetector(Node):
             
             # Verify bounding boxes are in output
             bbox_count = len([d for d in detection_data.get('detections', [{}])[0].get('detections', []) if 'bbox' in d])
-            self.get_logger().info(f"✅ Verified: {bbox_count} bounding boxes included in JSON output")
+            self.get_logger().info(f"Verified: {bbox_count} bounding boxes included in JSON output")
             self.get_logger().info("=" * 80)
             
         except Exception as e:
@@ -219,11 +255,62 @@ class SimpleSAMDetector(Node):
                 "error": str(e),
                 "timestamp": datetime.utcnow().isoformat() + "Z"
             }, indent=2)
-            self.get_logger().error(f"❌ Detection error: {e}")
+            self.get_logger().error(f"Detection error: {e}")
             import traceback
             self.get_logger().error(traceback.format_exc())
         
         return response
+
+    def _startup_announce(self):
+        """One-shot announce to make sure global topics appear after node startup."""
+        try:
+            # 1) Publish an initial placeholder detections message so the topic is created
+            self._publish_detections_ros()
+
+            # 2) Publish a status heartbeat immediately
+            ns = self.get_namespace()
+            dom = os.environ.get('ROS_DOMAIN_ID', '0')
+            uptime_sec = (self.get_clock().now() - self._node_start_time).nanoseconds / 1e9
+            status = String()
+            status.data = (
+                f"simple_sam_detector alive | ns={ns} | domain={dom} | "
+                f"uptime={uptime_sec:.1f}s | detections={len(self.latest_detections)}"
+            )
+            self.status_publisher.publish(status)
+
+            # 3) Log resolved info so users can verify
+            self.get_logger().info(
+                f"Namespace: '{ns}' | ROS_DOMAIN_ID: {dom} | Publishing '/vision/sam_detections' & '/vision/status'"
+            )
+
+            # 4) Optionally list known topics locally (helpful for debugging)
+            try:
+                topics = dict(self.get_topic_names_and_types())
+                visible = [t for t in topics.keys() if t.startswith('/vision')]
+                self.get_logger().info(f"Currently visible '/vision*' topics (local graph): {visible}")
+            except Exception:
+                pass
+        finally:
+            # Cancel so it runs only once
+            try:
+                self._startup_timer.cancel()
+            except Exception:
+                pass
+
+    def _heartbeat_callback(self):
+        """Periodic status publisher to keep the '/vision/*' namespace visible on the graph."""
+        try:
+            ns = self.get_namespace()
+            dom = os.environ.get('ROS_DOMAIN_ID', '0')
+            uptime_sec = (self.get_clock().now() - self._node_start_time).nanoseconds / 1e9
+            status = String()
+            status.data = (
+                f"simple_sam_detector heartbeat | ns={ns} | domain={dom} | "
+                f"uptime={uptime_sec:.1f}s | detections={len(self.latest_detections)}"
+            )
+            self.status_publisher.publish(status)
+        except Exception as e:
+            self.get_logger().warn(f"Heartbeat publish failed: {e}")
     
     def show_depth_callback(self, request, response):
         """Service callback for /vision/show_depth_image to display depth visualization"""
@@ -231,7 +318,7 @@ class SimpleSAMDetector(Node):
             if self.latest_depth is None:
                 response.success = False
                 response.message = "No depth image received yet from /camera/depth/image_raw."
-                self.get_logger().warn("⚠️ No depth image available")
+                self.get_logger().warn("No depth image available")
                 return response
             
             # Normalize depth for visualization
@@ -260,12 +347,12 @@ class SimpleSAMDetector(Node):
             
             response.success = True
             response.message = "Displayed latest depth image in OpenCV window."
-            self.get_logger().info(f"✅ Depth image displayed: {self.latest_depth.shape}")
+            self.get_logger().info(f"Depth image displayed: {self.latest_depth.shape}")
             
         except Exception as e:
             response.success = False
             response.message = f"Error displaying depth image: {str(e)}"
-            self.get_logger().error(f"❌ Depth display error: {e}")
+            self.get_logger().error(f"Depth display error: {e}")
             import traceback
             self.get_logger().error(traceback.format_exc())
         
@@ -422,6 +509,72 @@ class SimpleSAMDetector(Node):
         
         return schema
     
+    def _publish_detections_ros(self):
+        """
+        Publish detections as ROS2 message for real-time sharing
+        
+        This enables other nodes (scene_understanding, graspnet, etc.) to 
+        subscribe directly without parsing JSON.
+        
+        Currently publishes as Image placeholder until SAMDetections message is built.
+        """
+        try:
+            self.get_logger().info(f"Publishing {len(self.latest_detections)} detections to /vision/sam_detections")
+            
+            # # Publish placeholder message (Image with detection count in header)
+            # # This ensures the topic appears in ros2 topic list
+            # placeholder_msg = Image()
+            # placeholder_msg.header = Header()
+            # placeholder_msg.header.stamp = self.get_clock().now().to_msg()
+            # placeholder_msg.header.frame_id = "camera_link"
+            
+            # # Encode detection count in the image dimensions as placeholder
+            # placeholder_msg.height = len(self.latest_detections)
+            # placeholder_msg.width = self.frame_counter
+            # placeholder_msg.encoding = "placeholder_sam_detections"
+            # placeholder_msg.step = 0
+            # placeholder_msg.data = []
+            
+            # self.detection_publisher.publish(placeholder_msg)
+            # self.get_logger().info(f"Published placeholder message to /vision/sam_detections")
+            
+            # TODO: After building with SAMDetections message, replace above with:
+            
+            msg = SAMDetections()
+            msg.header = Header()
+            msg.header.stamp = self.get_clock().now().to_msg()
+            msg.header.frame_id = "camera_link"
+            msg.image_id = f"frame_{self.frame_counter:06d}"
+            
+            for det in self.latest_detections:
+                sam_det = SAMDetection()
+                sam_det.object_id = det['id']
+                sam_det.class_name = det['class_name']
+                sam_det.confidence = det['confidence']
+                sam_det.bbox = det['bbox']
+                sam_det.center = det['center']
+                sam_det.area = det['area']
+                sam_det.distance_cm = det.get('distance_cm', -1.0) if det.get('distance_cm') else -1.0
+                
+                # Convert mask to ROS Image message
+                sam_det.mask = self.bridge.cv2_to_imgmsg(det['mask'], encoding='mono8')
+                
+                msg.detections.append(sam_det)
+            
+            msg.total_detections = len(self.latest_detections)
+            
+            # Calculate average distance
+            distances = [d.get('distance_cm') for d in self.latest_detections if d.get('distance_cm')]
+            msg.average_distance_cm = sum(distances) / len(distances) if distances else -1.0
+            
+            self.detection_publisher.publish(msg)
+            
+        except Exception as e:
+            self.get_logger().error(f"Failed to publish ROS detections: {e}")
+            import traceback
+            self.get_logger().error(traceback.format_exc())
+    
+
     def visualization_callback(self):
         """Display camera feed with detections in OpenCV window"""
         # Use captured frame if available, otherwise latest_rgb

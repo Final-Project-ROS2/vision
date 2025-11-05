@@ -362,12 +362,12 @@ class ROS2SAMVisionPipeline(Node):
                 )
                 detections = results.get("detections", [])
                 masks = [d.get("mask", np.zeros(self.latest_rgb.shape[:2], dtype=np.uint8)) for d in detections]
-                self.get_logger().info(f"✅ SAM adapter detected {len(detections)} objects from real image")
+                self.get_logger().info(f" SAM adapter detected {len(detections)} objects from real image")
             else:
                 # Fallback: Use OpenCV contour detection directly
                 self.get_logger().info("🔍 Using OpenCV contour detection (SAM adapter not available)")
                 detections, masks = self._opencv_detect_objects(self.latest_rgb)
-                self.get_logger().info(f"✅ OpenCV detected {len(detections)} objects from real image")
+                self.get_logger().info(f"OpenCV detected {len(detections)} objects from real image")
             
             self.cached_detections = {"detections": detections, "masks": masks, "timestamp": datetime.now()}
             
