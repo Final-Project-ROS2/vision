@@ -113,6 +113,12 @@ ros2 service call /vision/detect_grasps std_srvs/srv/Trigger
 
 
 
+vision vnev setting in final_project_ws
+```bash
+source vision_venv/bin/activate
+```
+
+
 
 
 
