@@ -117,9 +117,15 @@ vision vnev setting in final_project_ws
 ```bash
 source vision_venv/bin/activate
 ```
+build custom interface
 
-
-
-
-
-
+```bash
+cd ~/final_project_ws
+colcon build --packages-select custom_interfaces
+source install/setup.bash
+```
+Verify the custom interface
+```bash
+ros2 interface show custom_interfaces/msg/SAMDetection
+ros2 interface show custom_interfaces/msg/SAMDetections
+```
