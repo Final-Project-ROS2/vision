@@ -1,46 +1,25 @@
 #!/usr/bin/env python3
 """
 CLIP Vision Classifier Node
-Focused CLIP-based image classification from /camera/image_raw
 
-Usage:
-    ros2 run vision clip_classifier
-    ros2 run vision clip_classifier --labels "cat,dog,car,airplane"
-    python3 -m vision.clip_classifier
-    
 Services:
-    /vision/classify_all - Classify entire image
-        ros2 service call /vision/classify_all std_srvs/srv/Trigger
+    1. /vision/classify_all
+       Classify entire camera image
+       ros2 service call /vision/classify_all std_srvs/srv/Trigger
     
-    /vision/classify_detect - Auto-detect objects with SAM, then classify each region
-        ros2 service call /vision/classify_detect std_srvs/srv/Trigger
-        Note: Requires simple_sam_detector to be running:
-              ros2 run vision simple_sam_detector
+    2. /vision/classify_bb
+       Classify specific bounding box region [x1,y1,x2,y2]
+       ros2 service call /vision/classify_bb custom_interfaces/srv/ClassifyBBox "{x1: 100, y1: 100, x2: 200, y2: 300}"
+    
+    3. Auto-classification via SAM subscription (pipeline)
+       Subscribes to /vision/sam_detections (SAMDetections message)
+       Automatically classifies each detected bounding box when SAM publishes
+       No service call needed - automatic when SAM publishes
+       ros2 service call /vision/detect_objects std_srvs/srv/Trigger
 
-// image vector embbeing fk this shit
-
-
-# Terminal 1: SAM Detector
-ros2 run vision simple_sam_detector
-
-# Terminal 2: CLIP Classifier  
-ros2 run vision clip_classifier
-
-
-ros2 service call /vision/classify_detect std_srvs/srv/Trigger
-
-
-
-
-
-You call: ros2 service call /vision/classify_detect std_srvs/srv/Trigger
-CLIP's classify_detect_callback is triggered
-CLIP internally calls: /vision/detect_objects service (SAM)
-SAM's detect_service_callback returns JSON with bounding boxes
-CLIP parses the bounding boxes from the JSON response
-CLIP crops each region and classifies it
-CLIP returns the final JSON with classifications
-
+Setup:
+    Terminal 1: ros2 run vision simple_sam_detector
+    Terminal 2: ros2 run vision clip_classifier
 
 """
 
@@ -58,13 +37,20 @@ from datetime import datetime
 from typing import List, Dict, Tuple
 import time
 
-# Import custom service (will be generated after build)
+# Import custom interfaces
 try:
-    from vision.srv import ClassifyRegions
-    CUSTOM_SRV_AVAILABLE = True
+    from custom_interfaces.srv import ClassifyBBox
+    from custom_interfaces.msg import SAMDetections, SAMDetection, CLIPClassification
+    CUSTOM_INTERFACES_AVAILABLE = True
 except ImportError:
-    CUSTOM_SRV_AVAILABLE = False
-    print("⚠️ Custom ClassifyRegions service not available. Build the package first.")
+    CUSTOM_INTERFACES_AVAILABLE = False
+    print("Custom interfaces not available. Build custom_interfaces package first.")
+    # Fallback imports
+    try:
+        from vision.msg import SAMDetections, SAMDetection
+        SAM_MSGS_AVAILABLE = True
+    except ImportError:
+        SAM_MSGS_AVAILABLE = False
 
 # Try to import CLIP/transformers
 try:
@@ -76,13 +62,8 @@ except ImportError:
     CLIP_AVAILABLE = False
     print("CLIP not available. Install: pip install torch transformers pillow")
 
-# Try to import SAM custom messages (fallback to placeholder if not built yet)
-try:
-    from vision.msg import SAMDetections, SAMDetection  # type: ignore
-    SAM_MSGS_AVAILABLE = True
-except ImportError:
-    SAM_MSGS_AVAILABLE = False
-    # We'll subscribe to placeholder Image messages instead
+# SAM messages availability (already checked in custom_interfaces import above)
+SAM_MSGS_AVAILABLE = CUSTOM_INTERFACES_AVAILABLE
 
 
 class CLIPClassifier(Node):
@@ -91,17 +72,15 @@ class CLIPClassifier(Node):
     
     Subscribes to:
         - /camera/image_raw (RGB images from Gazebo camera)
+        - /vision/sam_detections (SAMDetections for auto-classification)
     
     Services:
-        - /vision/classify_all (Classify entire image with JSON output)
-        - /vision/classify_detect (Auto-detect with SAM + classify regions)
-    
-    Service Clients:
-        - /vision/detect_objects (Calls SAM detector for object detection)
+        - /vision/classify_all (Classify entire image, returns labels and confidence only)
+        - /vision/classify_bb (Classify specific bounding box region)
     
     Display:
         - Shows live camera feed with top prediction in OpenCV window
-        - Shows classified regions with labels when using classify_detect
+        - Shows classified regions with labels from SAM detections
     """
     
     def __init__(self, candidate_labels: List[str] = None):
@@ -125,7 +104,7 @@ class CLIPClassifier(Node):
         self.latest_rgb = None
         self.captured_frame = None  # Single captured frame for classification
         self.latest_classification = None
-        self.latest_region_classifications = []  # For classify_detect
+        self.latest_region_classifications = []  # For SAM auto-classification
         self.frame_counter = 0
         self.frame_captured = False
         
@@ -133,10 +112,6 @@ class CLIPClassifier(Node):
         self.model = None
         self.processor = None
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        
-        # Service client for SAM detector
-        self.sam_detector_client = None
-        self.sam_sub = None
         
         # QoS profile for image subscription
         self.image_qos = QoSProfile(
@@ -163,17 +138,20 @@ class CLIPClassifier(Node):
             self.classify_all_callback
         )
         
-        # Use Trigger service instead of custom ClassifyRegions
-        self.classification_detect_service = self.create_service(
-            Trigger,
-            '/vision/classify_detect',
-            self.classify_detect_callback
-        )
+        if CUSTOM_INTERFACES_AVAILABLE:
+            self.classification_bb_service = self.create_service(
+                ClassifyBBox,
+                '/vision/classify_bb',
+                self.classify_bb_callback
+            )
+        else:
+            self.classification_bb_service = self.create_service(
+                Trigger,
+                '/vision/classify_bb',
+                self.classify_bb_callback_fallback
+            )
         
-        # Create service client to call SAM detector
-        self.sam_detector_client = self.create_client(Trigger, '/vision/detect_objects')
-
-        # Also subscribe to live SAM detections so CLIP reacts when SAM publishes
+        # Subscribe to live SAM detections for auto-classification
         if SAM_MSGS_AVAILABLE:
             self.sam_sub = self.create_subscription(
                 SAMDetections,
@@ -181,7 +159,7 @@ class CLIPClassifier(Node):
                 self.sam_detections_callback,
                 10
             )
-            self.get_logger().info("👂 Subscribing to: /vision/sam_detections (SAMDetections)")
+            self.get_logger().info("Subscribing to: /vision/sam_detections (SAMDetections)")
         else:
             # Fallback: placeholder Image publisher used by simple_sam_detector before custom msgs are built
             self.sam_sub = self.create_subscription(
@@ -190,14 +168,7 @@ class CLIPClassifier(Node):
                 self.sam_detections_placeholder_callback,
                 10
             )
-            self.get_logger().warn("👂 Subscribing to: /vision/sam_detections (placeholder Image). Build msgs for full integration.")
-        
-        # Check if SAM detector service is available
-        self.get_logger().info("⏳ Waiting for /vision/detect_objects service...")
-        if self.sam_detector_client.wait_for_service(timeout_sec=20.0):
-            self.get_logger().info("✅ SAM detector service is ready!")
-        else:
-            self.get_logger().warn("⚠️ SAM detector service not available yet. Start with: ros2 run vision simple_sam_detector")
+            self.get_logger().warn("Subscribing to: /vision/sam_detections (placeholder Image). Build msgs for full integration.")
         
         # OpenCV window setup
         self.window_name = "CLIP Classifier - /camera/image_raw"
@@ -207,27 +178,24 @@ class CLIPClassifier(Node):
         # Timer for visualization (30 Hz)
         self.viz_timer = self.create_timer(0.033, self.visualization_callback)
         
-        self.get_logger().info("🚀 CLIP Classifier Started")
-        self.get_logger().info(f"📡 Subscribing to: /camera/image_raw")
-        self.get_logger().info(f"🤖 Model: openai/clip-vit-base-patch32")
-        self.get_logger().info(f"🏷️  Labels: {', '.join(self.candidate_labels)}")
-        self.get_logger().info(f"💻 Device: {self.device}")
-        self.get_logger().info(f"🔧 Service: /vision/classify_all (classify entire image)")
-        self.get_logger().info(f"🔧 Service: /vision/classify_detect (auto-detect + classify)")
-        self.get_logger().info(f"   └─ Calls /vision/detect_objects → needs: ros2 run vision simple_sam_detector")
-        self.get_logger().info(f"👁️  OpenCV Window: '{self.window_name}'")
-        self.get_logger().info("💡 Usage: ros2 service call /vision/classify_all std_srvs/srv/Trigger")
-        self.get_logger().info("💡 Usage: ros2 service call /vision/classify_detect std_srvs/srv/Trigger")
-        self.get_logger().info("🔌 Live link: reacts to /vision/sam_detections by classifying regions automatically")
+        self.get_logger().info("CLIP Classifier Started")
+        self.get_logger().info(f"Subscribing to: /camera/image_raw")
+        self.get_logger().info(f"Model: openai/clip-vit-base-patch32")
+        self.get_logger().info(f"Labels: {', '.join(self.candidate_labels)}")
+        self.get_logger().info(f"Device: {self.device}")
+        self.get_logger().info(f"Service: /vision/classify_all")
+        self.get_logger().info(f"Service: /vision/classify_bb")
+        self.get_logger().info(f"Subscriber: /vision/sam_detections (auto-classify on SAM publish)")
+        self.get_logger().info(f"OpenCV Window: '{self.window_name}'")
     
     def _init_clip_model(self):
         """Initialize CLIP model"""
         if not CLIP_AVAILABLE:
-            self.get_logger().error("❌ CLIP not available! Install: pip install torch transformers pillow")
+            self.get_logger().error("CLIP not available! Install: pip install torch transformers pillow")
             return
         
         try:
-            self.get_logger().info("🔧 Loading CLIP model...")
+            self.get_logger().info("Loading CLIP model...")
             model_name = "openai/clip-vit-base-patch32"
             
             self.model = CLIPModel.from_pretrained(model_name).to(self.device)
@@ -235,10 +203,10 @@ class CLIPClassifier(Node):
             
             self.model.eval()  # Set to evaluation mode
             
-            self.get_logger().info(f"✅ CLIP model loaded successfully on {self.device}")
+            self.get_logger().info(f"CLIP model loaded successfully on {self.device}")
             
         except Exception as e:
-            self.get_logger().error(f"❌ Failed to load CLIP model: {e}")
+            self.get_logger().error(f"Failed to load CLIP model: {e}")
             self.model = None
             self.processor = None
     
@@ -253,7 +221,7 @@ class CLIPClassifier(Node):
             if not self.frame_captured:
                 self.captured_frame = self.latest_rgb.copy()
                 self.frame_captured = True
-                self.get_logger().info(f"📸 Captured frame {self.frame_counter} for classification")
+                self.get_logger().info(f"Captured frame {self.frame_counter} for classification")
                 
         except Exception as e:
             self.get_logger().error(f"Failed to convert image: {e}")
@@ -269,7 +237,7 @@ class CLIPClassifier(Node):
                     "error": "No frame captured yet from /camera/image_raw",
                     "timestamp": datetime.utcnow().isoformat() + "Z"
                 }, indent=2)
-                self.get_logger().warn("⚠️ No frame captured yet")
+                self.get_logger().warn("No frame captured yet")
                 return response
             
             if not CLIP_AVAILABLE or self.model is None:
@@ -280,10 +248,10 @@ class CLIPClassifier(Node):
                     "error": "CLIP model not available",
                     "timestamp": datetime.utcnow().isoformat() + "Z"
                 }, indent=2)
-                self.get_logger().error("❌ CLIP model not available")
+                self.get_logger().error("CLIP model not available")
                 return response
             
-            self.get_logger().info("🔍 Running CLIP classification on captured frame...")
+            self.get_logger().info("Running CLIP classification on captured frame...")
             
             # Run classification on captured frame
             classification_data = self._classify_image(self.captured_frame)
@@ -295,7 +263,7 @@ class CLIPClassifier(Node):
             
             top_pred = classification_data['output']['top_prediction']
             self.get_logger().info(
-                f"✅ Classification complete: {top_pred['label']} "
+                f"Classification complete: {top_pred['label']} "
                 f"(confidence: {top_pred['confidence']:.2f})"
             )
             
@@ -307,26 +275,144 @@ class CLIPClassifier(Node):
                 "error": str(e),
                 "timestamp": datetime.utcnow().isoformat() + "Z"
             }, indent=2)
-            self.get_logger().error(f"❌ Classification error: {e}")
+            self.get_logger().error(f"Classification error: {e}")
+            import traceback
+            self.get_logger().error(traceback.format_exc())
+        
+        return response
+    
+    def classify_bb_callback(self, request, response):
+        """Service callback for /vision/classify_bb with custom ClassifyBBox service"""
+        try:
+            if self.captured_frame is None:
+                response.success = False
+                response.label = ""
+                response.confidence = 0.0
+                response.all_predictions = json.dumps({
+                    "error": "No frame captured yet from /camera/image_raw",
+                    "timestamp": datetime.utcnow().isoformat() + "Z"
+                })
+                self.get_logger().warn("No frame captured yet")
+                return response
+            
+            if not CLIP_AVAILABLE or self.model is None:
+                response.success = False
+                response.label = ""
+                response.confidence = 0.0
+                response.all_predictions = json.dumps({
+                    "error": "CLIP model not available",
+                    "timestamp": datetime.utcnow().isoformat() + "Z"
+                })
+                self.get_logger().error("CLIP model not available")
+                return response
+            
+            # Extract bbox from request
+            bbox = [request.x1, request.y1, request.x2, request.y2]
+            
+            self.get_logger().info(f"Classifying bounding box region: {bbox}")
+            
+            # Classify single region
+            classification_data = self._classify_regions(self.captured_frame, [bbox])
+            region = classification_data['output']['classified_regions'][0]
+            
+            self.latest_region_classifications = [region]
+            self.latest_classification = None
+            
+            response.success = True
+            response.label = region['top_prediction']['label']
+            response.confidence = float(region['top_prediction']['confidence'])
+            response.all_predictions = json.dumps(region['all_predictions'])
+            
+            self.get_logger().info(
+                f"Region classification complete: {response.label} "
+                f"(confidence: {response.confidence:.2f})"
+            )
+            
+        except Exception as e:
+            response.success = False
+            response.label = ""
+            response.confidence = 0.0
+            response.all_predictions = json.dumps({
+                "error": str(e),
+                "timestamp": datetime.utcnow().isoformat() + "Z"
+            })
+            self.get_logger().error(f"Bounding box classification error: {e}")
+            import traceback
+            self.get_logger().error(traceback.format_exc())
+        
+        return response
+    
+    def classify_bb_callback_fallback(self, request, response):
+        """Fallback service callback when ClassifyBBox not available (uses Trigger with center bbox)"""
+        try:
+            if self.captured_frame is None:
+                response.success = False
+                response.message = json.dumps({
+                    "error": "No frame captured yet from /camera/image_raw",
+                    "timestamp": datetime.utcnow().isoformat() + "Z"
+                }, indent=2)
+                self.get_logger().warn("No frame captured yet")
+                return response
+            
+            if not CLIP_AVAILABLE or self.model is None:
+                response.success = False
+                response.message = json.dumps({
+                    "error": "CLIP model not available",
+                    "timestamp": datetime.utcnow().isoformat() + "Z"
+                }, indent=2)
+                self.get_logger().error("CLIP model not available")
+                return response
+            
+            # Use center 50% of image as example bbox
+            h, w = self.captured_frame.shape[:2]
+            bbox = [w//4, h//4, 3*w//4, 3*h//4]
+            
+            self.get_logger().info(f"Classifying center bbox region: {bbox}")
+            
+            # Classify single region
+            classification_data = self._classify_regions(self.captured_frame, [bbox])
+            region = classification_data['output']['classified_regions'][0]
+            
+            self.latest_region_classifications = [region]
+            self.latest_classification = None
+            
+            response.success = True
+            response.message = json.dumps({
+                "bbox": bbox,
+                "top_prediction": region['top_prediction'],
+                "all_predictions": region['all_predictions']
+            }, indent=2)
+            
+            top_pred = region['top_prediction']
+            self.get_logger().info(
+                f"Region classification complete: {top_pred['label']} "
+                f"(confidence: {top_pred['confidence']:.2f})"
+            )
+            
+        except Exception as e:
+            response.success = False
+            response.message = json.dumps({
+                "error": str(e),
+                "timestamp": datetime.utcnow().isoformat() + "Z"
+            }, indent=2)
+            self.get_logger().error(f"Bounding box classification error: {e}")
             import traceback
             self.get_logger().error(traceback.format_exc())
         
         return response
 
     def sam_detections_callback(self, msg: 'SAMDetections'):
-        """Handle incoming SAM detections and classify regions automatically.
-
-        This lets the CLIP node consume the SAM pipeline without needing to call the service.
-        """
+        """Handle incoming SAM detections and automatically classify each region"""
         try:
             if not CLIP_AVAILABLE or self.model is None:
-                self.get_logger().warn("CLIP model not available yet; ignoring SAM detections")
+                self.get_logger().warn("CLIP model not available, ignoring SAM detections")
                 return
+            
             if self.captured_frame is None:
-                self.get_logger().warn("No captured frame available; waiting for /camera/image_raw")
+                self.get_logger().warn("No captured frame, waiting for /camera/image_raw")
                 return
 
-            # Extract bboxes from SAMDetections
+            # Extract bboxes from SAMDetections message
             bboxes: List[List[int]] = []
             for det in msg.detections:
                 bbox = list(det.bbox)
@@ -337,281 +423,35 @@ class CLIPClassifier(Node):
                 self.get_logger().warn("SAM detections message has no valid bounding boxes")
                 return
 
-            self.get_logger().info(f"🧩 Received {len(bboxes)} SAM regions → classifying with CLIP…")
+            self.get_logger().info(f"Received {len(bboxes)} SAM regions, classifying with CLIP...")
+            
+            # Classify all detected regions
             classification_data = self._classify_regions(self.captured_frame, bboxes)
             self.latest_region_classifications = classification_data['output']['classified_regions']
             self.latest_classification = None
+            
+            # Log results
+            for region in self.latest_region_classifications:
+                top_pred = region['top_prediction']
+                self.get_logger().info(
+                    f"Region {region['region_id']}: {top_pred['label']} "
+                    f"(confidence: {top_pred['confidence']:.2f})"
+                )
+            
         except Exception as e:
             self.get_logger().error(f"Error handling SAM detections: {e}")
             import traceback
             self.get_logger().error(traceback.format_exc())
 
     def sam_detections_placeholder_callback(self, msg: Image):
-        """Handle placeholder /vision/sam_detections messages (Image) from SimpleSAM.
-
-        The placeholder encodes only counts; we can't get bboxes, so just log and wait
-        for the service-based integration or rebuilt messages.
-        """
+        """Handle placeholder SAM detections (Image) before custom messages are built"""
         try:
-            # The simple_sam_detector encodes counts in height/width for visibility only
             self.get_logger().info(
-                f"📨 Placeholder SAM detections received: count_hint={msg.height}, frame={msg.width}"
+                f"Placeholder SAM detections received: count={msg.height}, frame={msg.width}. "
+                "Build custom messages to enable auto-classification."
             )
-            self.get_logger().info("Build custom messages to enable auto-classification from topic events.")
         except Exception as e:
             self.get_logger().error(f"Error handling placeholder SAM detections: {e}")
-    
-    def classify_detect_callback(self, request, response):
-        """Service callback for /vision/classify_detect - detect objects then classify regions"""
-        try:
-            if self.captured_frame is None:
-                response.success = False
-                response.message = json.dumps({
-                    "pipeline": "clip_with_detection",
-                    "success": False,
-                    "error": "No frame captured yet from /camera/image_raw",
-                    "timestamp": datetime.utcnow().isoformat() + "Z"
-                }, indent=2)
-                self.get_logger().warn("⚠️ No frame captured yet")
-                return response
-            
-            # Confirm using captured frame
-            self.get_logger().info("=" * 80)
-            self.get_logger().info(f"📸 Using CAPTURED FRAME {self.frame_counter} for detection + classification")
-            self.get_logger().info(f"   Frame shape: {self.captured_frame.shape}")
-            self.get_logger().info("=" * 80)
-            
-            if not CLIP_AVAILABLE or self.model is None:
-                response.success = False
-                response.message = json.dumps({
-                    "pipeline": "clip_with_detection",
-                    "success": False,
-                    "error": "CLIP model not available",
-                    "timestamp": datetime.utcnow().isoformat() + "Z"
-                }, indent=2)
-                self.get_logger().error("❌ CLIP model not available")
-                return response
-            
-            # Step 1: Call SAM detector to get bounding boxes
-            self.get_logger().info("🔍 Step 1/2: Calling /vision/detect_objects service...")
-            
-            # Wait for SAM detector service with shorter timeout
-            if not self.sam_detector_client.wait_for_service(timeout_sec=2.0):
-                response.success = False
-                response.message = json.dumps({
-                    "pipeline": "clip_with_detection",
-                    "success": False,
-                    "error": "SAM detector service /vision/detect_objects not available. Run: ros2 run vision simple_sam_detector",
-                    "timestamp": datetime.utcnow().isoformat() + "Z"
-                }, indent=2)
-                self.get_logger().error("❌ /vision/detect_objects service not available")
-                self.get_logger().error("   Make sure SAM detector is running: ros2 run vision simple_sam_detector")
-                return response
-            
-            self.get_logger().info("✅ SAM detector service found, sending request...")
-            
-            # Call SAM detector
-            sam_request = Trigger.Request()
-            sam_future = self.sam_detector_client.call_async(sam_request)
-            
-            self.get_logger().info("⏳ Waiting for SAM detection to complete (this may take 10-15 seconds)...")
-            
-            # Wait for response with timeout and active spinning
-            timeout_start = time.time()
-            timeout_duration = 20.0  # Reduced from 30s
-            
-            while not sam_future.done():
-                elapsed = time.time() - timeout_start
-                if elapsed >= timeout_duration:
-                    self.get_logger().error(f"❌ SAM detection timeout after {timeout_duration}s")
-                    self.get_logger().error("   This usually means:")
-                    self.get_logger().error("   1. SAM detector is not running → Start with: ros2 run vision simple_sam_detector")
-                    self.get_logger().error("   2. SAM is processing but too slow → Check GPU/CPU usage")
-                    self.get_logger().error("   3. SAM is not receiving images → Check /camera/image_raw topic")
-                    
-                    response.success = False
-                    response.message = json.dumps({
-                        "pipeline": "clip_with_detection",
-                        "success": False,
-                        "error": f"SAM detection timeout after {timeout_duration}s. Make sure simple_sam_detector is running and processing images.",
-                        "timestamp": datetime.utcnow().isoformat() + "Z"
-                    }, indent=2)
-                    return response
-                
-                # Actively spin to process callbacks
-                rclpy.spin_once(self, timeout_sec=0.1)
-                
-                # Show progress every 2 seconds
-                if int(elapsed) % 2 == 0 and elapsed > 0:
-                    self.get_logger().info(f"   Still waiting... ({elapsed:.0f}s / {timeout_duration}s)")
-            
-            try:
-                sam_response = sam_future.result()
-            except Exception as e:
-                response.success = False
-                response.message = json.dumps({
-                    "pipeline": "clip_with_detection",
-                    "success": False,
-                    "error": f"Failed to get SAM response: {str(e)}",
-                    "timestamp": datetime.utcnow().isoformat() + "Z"
-                }, indent=2)
-                self.get_logger().error(f"❌ Failed to get SAM response: {e}")
-                return response
-            
-            self.get_logger().info(f"✅ SAM response received in {time.time() - timeout_start:.1f}s")
-            
-            # Print full SAM JSON response for debugging
-            self.get_logger().info("=" * 80)
-            self.get_logger().info("📋 SAM JSON RESPONSE (FULL):")
-            self.get_logger().info("=" * 80)
-            self.get_logger().info(sam_response.message)
-            self.get_logger().info("=" * 80)
-            
-            if not sam_response.success:
-                response.success = False
-                response.message = json.dumps({
-                    "pipeline": "clip_with_detection",
-                    "success": False,
-                    "error": f"SAM detection failed: {sam_response.message}",
-                    "sam_message": sam_response.message[:500],  # First 500 chars for debugging
-                    "timestamp": datetime.utcnow().isoformat() + "Z"
-                }, indent=2)
-                self.get_logger().error(f"❌ SAM detection failed")
-                self.get_logger().error(f"   SAM message: {sam_response.message[:200]}")
-                return response
-            
-            # Parse SAM detection results
-            self.get_logger().info("📋 Parsing SAM detection results...")
-            try:
-                sam_data = json.loads(sam_response.message)
-                self.get_logger().info(f"✅ SAM data parsed successfully")
-                
-                # Debug: Show SAM data structure
-                self.get_logger().debug(f"   SAM data keys: {list(sam_data.keys())}")
-                
-                if not sam_data.get('success', False):
-                    response.success = False
-                    response.message = json.dumps({
-                        "pipeline": "clip_with_detection",
-                        "success": False,
-                        "error": f"SAM detection unsuccessful: {sam_data.get('error', 'Unknown error')}",
-                        "timestamp": datetime.utcnow().isoformat() + "Z"
-                    }, indent=2)
-                    return response
-                
-                # Extract bounding boxes from detection results
-                # SAM detector returns: {"success": true, "detections": [{"detections": [...], ...}]}
-                bboxes = []
-                
-                self.get_logger().info("🔍 Searching for bounding boxes in SAM response...")
-                
-                # Check for 'output' field (from SAM schema)
-                if 'output' in sam_data:
-                    detections_list = sam_data['output'].get('detections', [])
-                    self.get_logger().info(f"📦 Found 'output' field with {len(detections_list)} detections")
-                    for idx, det in enumerate(detections_list):
-                        bbox = det.get('bbox')
-                        if bbox and len(bbox) == 4:
-                            self.get_logger().info(f"   ✓ Detection {idx}: bbox={bbox}")
-                            bboxes.append(bbox)
-                        else:
-                            self.get_logger().warn(f"   ✗ Detection {idx}: invalid bbox={bbox}")
-                            
-                # Fallback: Check for 'detections' field
-                elif 'detections' in sam_data and len(sam_data['detections']) > 0:
-                    self.get_logger().info(f"📦 Found 'detections' field with {len(sam_data['detections'])} detection sets")
-                    for set_idx, detection_set in enumerate(sam_data['detections']):
-                        detections_list = detection_set.get('detections', [])
-                        self.get_logger().info(f"   Set {set_idx}: {len(detections_list)} detections")
-                        for det_idx, det in enumerate(detections_list):
-                            bbox = det.get('bbox')
-                            if bbox and len(bbox) == 4:
-                                self.get_logger().info(f"      ✓ Detection {det_idx}: bbox={bbox}")
-                                bboxes.append(bbox)
-                            else:
-                                self.get_logger().warn(f"      ✗ Detection {det_idx}: invalid bbox={bbox}")
-                else:
-                    self.get_logger().warn("⚠️ SAM response has neither 'output' nor 'detections' field")
-                    self.get_logger().info(f"   Available keys: {list(sam_data.keys())}")
-                
-                if not bboxes:
-                    self.get_logger().warn("⚠️ No bounding boxes extracted from SAM response")
-                    self.get_logger().info(f"   SAM response structure (first 500 chars): {json.dumps(sam_data, indent=2)[:500]}...")
-                    
-                    response.success = False
-                    response.message = json.dumps({
-                        "pipeline": "clip_with_detection",
-                        "success": False,
-                        "error": "No objects detected by SAM detector",
-                        "hint": "Try adjusting camera position or ensure objects are visible in scene",
-                        "sam_response_sample": str(sam_data)[:300],
-                        "timestamp": datetime.utcnow().isoformat() + "Z"
-                    }, indent=2)
-                    return response
-                
-                self.get_logger().info("=" * 80)
-                self.get_logger().info(f"✅ SAM detected {len(bboxes)} objects with valid bounding boxes")
-                self.get_logger().info(f"   Bounding boxes: {bboxes}")
-                self.get_logger().info("=" * 80)
-                
-            except json.JSONDecodeError as e:
-                self.get_logger().error(f"❌ Failed to parse SAM response as JSON: {e}")
-                self.get_logger().error(f"   Response (first 300 chars): {sam_response.message[:300]}")
-                
-                response.success = False
-                response.message = json.dumps({
-                    "pipeline": "clip_with_detection",
-                    "success": False,
-                    "error": f"Failed to parse SAM response as JSON: {e}",
-                    "raw_response_sample": sam_response.message[:300],
-                    "timestamp": datetime.utcnow().isoformat() + "Z"
-                }, indent=2)
-                return response
-            
-            # Step 2: Classify each detected region with CLIP
-            self.get_logger().info("=" * 80)
-            self.get_logger().info(f"🔍 Step 2/2: Classifying {len(bboxes)} detected regions with CLIP...")
-            self.get_logger().info(f"📸 Using CAPTURED FRAME shape: {self.captured_frame.shape}")
-            self.get_logger().info("=" * 80)
-            
-            classification_data = self._classify_regions(self.captured_frame, bboxes)
-            self.latest_region_classifications = classification_data['output']['classified_regions']
-            self.latest_classification = None  # Clear full image classification
-            
-            # Add SAM detection info to response
-            classification_data['sam_detection'] = {
-                'total_detections': len(bboxes),
-                'bboxes': bboxes,
-                'detection_time_ms': int((time.time() - timeout_start) * 1000)
-            }
-            
-            response.success = True
-            response.message = json.dumps(classification_data, indent=2)
-            
-            self.get_logger().info(f"✅ Pipeline complete: {len(bboxes)} regions detected and classified")
-            
-            # Log each region's top prediction
-            for region in classification_data['output']['classified_regions']:
-                top_pred = region['top_prediction']
-                bbox = region['bbox']
-                self.get_logger().info(
-                    f"   Region {region['region_id']} {bbox}: {top_pred['label']} "
-                    f"(confidence: {top_pred['confidence']:.2f})"
-                )
-            
-        except Exception as e:
-            response.success = False
-            response.message = json.dumps({
-                "pipeline": "clip_with_detection",
-                "success": False,
-                "error": str(e),
-                "timestamp": datetime.utcnow().isoformat() + "Z"
-            }, indent=2)
-            self.get_logger().error(f"❌ Classification error: {e}")
-            import traceback
-            self.get_logger().error(traceback.format_exc())
-        
-        return response
     
     def _classify_image(self, rgb_image: np.ndarray) -> Dict:
         """
@@ -643,15 +483,8 @@ class CLIPClassifier(Node):
             logits_per_image = outputs.logits_per_image
             probs = logits_per_image.softmax(dim=1)[0]
         
-        # Get embeddings
-        with torch.no_grad():
-            image_features = self.model.get_image_features(inputs.pixel_values)
-            text_features = self.model.get_text_features(inputs.input_ids)
-        
         # Convert to numpy
         probs_np = probs.cpu().numpy()
-        image_vector = image_features[0].cpu().numpy().tolist()
-        text_vectors = text_features.cpu().numpy()
         
         # Sort predictions by confidence
         sorted_indices = np.argsort(probs_np)[::-1]
@@ -661,21 +494,13 @@ class CLIPClassifier(Node):
         for idx in sorted_indices:
             all_predictions.append({
                 "label": self.candidate_labels[idx],
-                "confidence": float(probs_np[idx])
-            })
-        
-        # Build text vectors with labels
-        text_vectors_list = []
-        for i, label in enumerate(self.candidate_labels):
-            text_vectors_list.append({
-                "label": label,
-                "vector": text_vectors[i].tolist()
+                "confidence": round(float(probs_np[idx]), 2)
             })
         
         # Calculate processing time
         processing_time_ms = int((time.time() - start_time) * 1000)
         
-        # Build JSON schema
+        # Build JSON schema (without image vectors)
         schema = {
             "pipeline": "single_clip",
             "model": "openai/clip-vit-base-patch32",
@@ -686,20 +511,9 @@ class CLIPClassifier(Node):
             "output": {
                 "top_prediction": {
                     "label": all_predictions[0]["label"],
-                    "confidence": round(all_predictions[0]["confidence"], 2)
+                    "confidence": all_predictions[0]["confidence"]
                 },
-                "all_predictions": [
-                    {
-                        "label": pred["label"],
-                        "confidence": round(pred["confidence"], 2)
-                    }
-                    for pred in all_predictions
-                ],
-                "embedding": {
-                    "image_vector": image_vector,
-                    "text_vectors": text_vectors_list,
-                    "similarity_method": "cosine"
-                },
+                "all_predictions": all_predictions,
                 "metadata": {
                     "timestamp": datetime.utcnow().isoformat() + "Z",
                     "processing_time_ms": processing_time_ms,
@@ -737,7 +551,7 @@ class CLIPClassifier(Node):
             
             # Skip invalid boxes
             if x2 <= x1 or y2 <= y1:
-                self.get_logger().warn(f"⚠️ Skipping invalid bbox: {bbox}")
+                self.get_logger().warn(f"Skipping invalid bbox: {bbox}")
                 continue
             
             # Crop region
@@ -837,7 +651,7 @@ class CLIPClassifier(Node):
         vis_image = self.captured_frame.copy()
         h, w = vis_image.shape[:2]
         
-        # Check if we have region classifications (from classify_detect)
+        # Check if we have region classifications (from SAM auto-classification)
         if self.latest_region_classifications:
             # Draw each classified region with bounding box and label
             for region in self.latest_region_classifications:
@@ -955,7 +769,7 @@ class CLIPClassifier(Node):
             # Show "Call service to classify" message
             cv2.putText(
                 vis_image,
-                "Call /vision/classify_all or /vision/classify_detect",
+                "Call /vision/classify_all or /vision/classify_bb",
                 (20, h-30),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.7,
@@ -1006,7 +820,7 @@ def main(args=None):
             labels_str = sys.argv[idx + 1]
             candidate_labels = [label.strip() for label in labels_str.split(',')]
         except (IndexError, ValueError):
-            print("⚠️ Invalid --labels format. Use: --labels 'cat,dog,car'")
+            print("Invalid --labels format. Use: --labels 'cat,dog,car'")
     
     try:
         node = CLIPClassifier(candidate_labels=candidate_labels)

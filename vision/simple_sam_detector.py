@@ -15,7 +15,7 @@ Service:
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy
-from custom_interfaces.msg import SAMDetections 
+from custom_interfaces.msg import SAMDetections, SAMDetection
 from sensor_msgs.msg import Image
 from std_srvs.srv import Trigger
 from std_msgs.msg import Header
@@ -516,58 +516,61 @@ class SimpleSAMDetector(Node):
         This enables other nodes (scene_understanding, graspnet, etc.) to 
         subscribe directly without parsing JSON.
         
-        Currently publishes as Image placeholder until SAMDetections message is built.
+        Uses SAMDetections message with array of SAMDetection objects.
         """
         try:
             self.get_logger().info(f"Publishing {len(self.latest_detections)} detections to /vision/sam_detections")
             
-            # # Publish placeholder message (Image with detection count in header)
-            # # This ensures the topic appears in ros2 topic list
-            # placeholder_msg = Image()
-            # placeholder_msg.header = Header()
-            # placeholder_msg.header.stamp = self.get_clock().now().to_msg()
-            # placeholder_msg.header.frame_id = "camera_link"
-            
-            # # Encode detection count in the image dimensions as placeholder
-            # placeholder_msg.height = len(self.latest_detections)
-            # placeholder_msg.width = self.frame_counter
-            # placeholder_msg.encoding = "placeholder_sam_detections"
-            # placeholder_msg.step = 0
-            # placeholder_msg.data = []
-            
-            # self.detection_publisher.publish(placeholder_msg)
-            # self.get_logger().info(f"Published placeholder message to /vision/sam_detections")
-            
-            # TODO: After building with SAMDetections message, replace above with:
-            
+            # Create SAMDetections message
             msg = SAMDetections()
             msg.header = Header()
             msg.header.stamp = self.get_clock().now().to_msg()
             msg.header.frame_id = "camera_link"
             msg.image_id = f"frame_{self.frame_counter:06d}"
             
+            # Initialize detections array
+            msg.detections = []
+            
+            # Populate detections array
+            total_distance = 0.0
+            distance_count = 0
+            
             for det in self.latest_detections:
                 sam_det = SAMDetection()
                 sam_det.object_id = det['id']
                 sam_det.class_name = det['class_name']
-                sam_det.confidence = det['confidence']
+                sam_det.confidence = float(det['confidence'])
+                
+                # Bbox as [x1, y1, x2, y2] - already in correct format
                 sam_det.bbox = det['bbox']
+                
+                # Center as [x, y]
                 sam_det.center = det['center']
-                sam_det.area = det['area']
-                sam_det.distance_cm = det.get('distance_cm', -1.0) if det.get('distance_cm') else -1.0
+                
+                # Area as int32
+                sam_det.area = int(det['area'])
+                
+                # Distance in cm (use -1.0 if unavailable)
+                distance = det.get('distance_cm')
+                sam_det.distance_cm = float(distance) if distance is not None else -1.0
+                
+                if sam_det.distance_cm > 0:
+                    total_distance += sam_det.distance_cm
+                    distance_count += 1
                 
                 # Convert mask to ROS Image message
                 sam_det.mask = self.bridge.cv2_to_imgmsg(det['mask'], encoding='mono8')
                 
                 msg.detections.append(sam_det)
             
+            # Summary statistics
             msg.total_detections = len(self.latest_detections)
             
-            # Calculate average distance
-            distances = [d.get('distance_cm') for d in self.latest_detections if d.get('distance_cm')]
-            msg.average_distance_cm = sum(distances) / len(distances) if distances else -1.0
+            # Calculate average distance (exclude -1.0 values)
+            msg.average_distance_cm = float(total_distance / distance_count) if distance_count > 0 else -1.0
             
             self.detection_publisher.publish(msg)
+            self.get_logger().info(f"Published SAMDetections message with {msg.total_detections} detections")
             
         except Exception as e:
             self.get_logger().error(f"Failed to publish ROS detections: {e}")

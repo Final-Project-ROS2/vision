@@ -1,86 +1,48 @@
 #!/bin/bash
-# Test Integrated Vision Pipeline: SAM Detection + CLIP Classification
-# 
-# This script demonstrates the complete pipeline:
-# 1. Camera publishes to /camera/image_raw
-# 2. SAM detector finds objects
-# 3. CLIP classifier labels each detected object
+# Test script for integrated SAM+CLIP pipeline
 
-echo "=========================================="
-echo "Integrated Vision Pipeline Test"
-echo "SAM Detection + CLIP Classification"
-echo "=========================================="
+echo "=================================="
+echo "Testing Integrated SAM+CLIP Pipeline"
+echo "=================================="
 echo ""
 
-# Check if nodes are running
-echo "Checking required nodes..."
-echo ""
-
-# Check for SAM detector
-if ros2 service list | grep -q "/vision/detect_objects"; then
-    echo "✅ SAM Detector is running (/vision/detect_objects available)"
+# Check if camera is publishing
+echo "1. Checking camera topic..."
+if ros2 topic list | grep -q "/camera/image_raw"; then
+    echo "   ✅ Camera topic /camera/image_raw found"
 else
-    echo "❌ SAM Detector NOT running!"
-    echo "   Start it with: ros2 run vision simple_sam_detector"
-    echo ""
-    read -p "Start SAM detector now? (y/n) " -n 1 -r
-    echo
-    if [[ $REPLY =~ ^[Yy]$ ]]; then
-        echo "Starting SAM detector in background..."
-        gnome-terminal -- bash -c "source install/setup.bash && ros2 run vision simple_sam_detector; exec bash" &
-        sleep 3
-    else
-        echo "Cannot proceed without SAM detector. Exiting."
-        exit 1
-    fi
+    echo "   ❌ Camera topic /camera/image_raw NOT found"
+    echo "   Please start the camera first!"
+    exit 1
 fi
 
-# Check for CLIP classifier
-if ros2 service list | grep -q "/vision/classify_detect"; then
-    echo "✅ CLIP Classifier is running (/vision/classify_detect available)"
+# Check if service exists
+echo ""
+echo "2. Checking service..."
+if ros2 service list | grep -q "/vision/process_pipeline"; then
+    echo "   ✅ Service /vision/process_pipeline found"
 else
-    echo "❌ CLIP Classifier NOT running!"
-    echo "   Start it with: ros2 run vision clip_classifier"
+    echo "   ⚠️  Service /vision/process_pipeline NOT found"
+    echo "   The node needs to be (re)started"
     echo ""
-    read -p "Start CLIP classifier now? (y/n) " -n 1 -r
-    echo
-    if [[ $REPLY =~ ^[Yy]$ ]]; then
-        echo "Starting CLIP classifier in background..."
-        gnome-terminal -- bash -c "source install/setup.bash && ros2 run vision clip_classifier; exec bash" &
-        sleep 5
-    else
-        echo "Cannot proceed without CLIP classifier. Exiting."
-        exit 1
-    fi
+    echo "   Start with: ros2 run vision sam_clip_pipeline"
+    exit 1
 fi
 
+# Call the service
 echo ""
-echo "=========================================="
-echo "Running Integrated Pipeline Test"
-echo "=========================================="
+echo "3. Calling service /vision/process_pipeline..."
+echo "   This will:"
+echo "   - Detect objects with SAM"
+echo "   - Show SAM results (press any key to continue)"
+echo "   - Classify with CLIP"
+echo "   - Show final results"
+echo "   - Print JSON to terminal"
 echo ""
-echo "Pipeline: /camera/image_raw → SAM Detection → CLIP Classification"
-echo ""
-echo "Calling service: /vision/classify_detect"
-echo ""
-echo "This will:"
-echo "  1. Get current camera image"
-echo "  2. Detect objects with SAM"
-echo "  3. Classify each detected region with CLIP"
-echo "  4. Return JSON with all detections and classifications"
-echo ""
-echo "Press Enter to continue..."
-read
-
-# Call the integrated service
-ros2 service call /vision/classify_detect std_srvs/srv/Trigger
+echo "   Calling service now..."
+ros2 service call /vision/process_pipeline std_srvs/srv/Trigger
 
 echo ""
-echo "=========================================="
-echo "Test Complete!"
-echo "=========================================="
-echo ""
-echo "Check the OpenCV windows to see:"
-echo "  - SAM Detector: Green boxes around detected objects"
-echo "  - CLIP Classifier: Yellow boxes with classification labels"
-echo ""
+echo "=================================="
+echo "Test complete!"
+echo "=================================="
