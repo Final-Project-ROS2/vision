@@ -59,6 +59,7 @@ setup(
             'clip_classifier = vision.clip_classifier:main',
             'sam_clip_pipeline = vision.sam_clip_pipeline:main',
             'graspnet_detector = vision.graspnet_detector:main',
+            'scene_understanding = vision.scene_understanding:main',
             # 'show_rgb_image = vision.show_rgb_image_node:main',
             # 'show_depth_image = vision.show_depth_image_node:main',
             # 'camera_service = vision.camera_service_node:main',

@@ -5,17 +5,31 @@ Simple SAM Vision Detection Node
 Provides object detection and segmentation using OpenCV-based methods.
 Subscribes to camera topics and provides detection services.
 
-Usage:
-    ros2 run vision simple_sam_detector
+Services:
+    1. /vision/run_pipeline
+       Trigger SAM detection and publish to /vision/sam_detections topic (message - many frame)
+       CLIP automatically subscribes and classifies regions
+       ros2 service call /vision/run_pipeline std_srvs/srv/Trigger
     
-Service:
-    ros2 service call /vision/detect_objects std_srvs/srv/Trigger
+    2. /vision/detect_objects
+       Trigger SAM detection and return results directly in service response (service - one frame only)
+       Returns parallel arrays of object_ids, bboxes, confidences, and distances
+       ros2 service call /vision/detect_objects custom_interfaces/srv/DetectObjects
+    
+    3. /vision/show_depth_image
+       Display depth camera visualization
+       ros2 service call /vision/show_depth_image std_srvs/srv/Trigger
+
+Setup:
+    Terminal 1: ros2 run vision simple_sam_detector
+    Terminal 2: ros2 service call /vision/run_pipeline std_srvs/srv/Trigger
 """
 
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy
 from custom_interfaces.msg import SAMDetections, SAMDetection
+from custom_interfaces.srv import DetectObjects
 from sensor_msgs.msg import Image
 from std_srvs.srv import Trigger
 from std_msgs.msg import Header
@@ -42,7 +56,8 @@ class SimpleSAMDetector(Node):
         - /vision/sam_detections (SAMDetections message with all detections)
     
     Services:
-        - /vision/detect_objects (Trigger detection on current image)
+        - /vision/run_pipeline (Trigger detection and publish to topic)
+        - /vision/detect_objects (Trigger detection and return results in response)
         - /vision/show_depth_image (Display depth visualization)
     
     Display:
@@ -93,8 +108,15 @@ class SimpleSAMDetector(Node):
         # Detection service
         self.detection_service = self.create_service(
             Trigger,
+            '/vision/run_pipeline',
+            self.run_pipeline_callback
+        )
+        
+        # Direct detection service (returns results in response)
+        self.detect_objects_service = self.create_service(
+            DetectObjects,
             '/vision/detect_objects',
-            self.detect_service_callback
+            self.detect_objects_callback
         )
         
         # Depth display service
@@ -137,13 +159,15 @@ class SimpleSAMDetector(Node):
         self.get_logger().info(f"Subscribing to: /camera/image_raw")
         self.get_logger().info(f"Subscribing to: /camera/depth/image_raw")
         self.get_logger().info(f"Will capture ONE frame for efficient detection")
-        self.get_logger().info(f"Service: /vision/detect_objects")
+        self.get_logger().info(f"Service: /vision/run_pipeline (publish to topic)")
+        self.get_logger().info(f"Service: /vision/detect_objects (return in response)")
         self.get_logger().info(f"Service: /vision/show_depth_image")
         self.get_logger().info(f"Publisher: /vision/sam_detections")
         self.get_logger().info(f"OpenCV Window: '{self.window_name}'")
         self.get_logger().info(f"Optimized: Only detects when service is called")
         self.get_logger().info("=" * 80)
-        self.get_logger().info("Call service: ros2 service call /vision/detect_objects std_srvs/srv/Trigger")
+        self.get_logger().info("Run pipeline: ros2 service call /vision/run_pipeline std_srvs/srv/Trigger")
+        self.get_logger().info("Get results:  ros2 service call /vision/detect_objects custom_interfaces/srv/DetectObjects")
         self.get_logger().info("Show depth:   ros2 service call /vision/show_depth_image std_srvs/srv/Trigger")
         self.get_logger().info("=" * 80)
 
@@ -189,8 +213,8 @@ class SimpleSAMDetector(Node):
         except Exception as e:
             self.get_logger().error(f"Failed to convert depth image: {e}")
     
-    def detect_service_callback(self, request, response):
-        """Service callback for /vision/detect_objects"""
+    def run_pipeline_callback(self, request, response):
+        """Service callback for /vision/run_pipeline - triggers detection and publishes to topic"""
         try:
             # Use captured frame instead of latest_rgb for consistency
             frame_to_use = self.captured_frame if self.frame_captured else self.latest_rgb
@@ -255,6 +279,92 @@ class SimpleSAMDetector(Node):
                 "error": str(e),
                 "timestamp": datetime.utcnow().isoformat() + "Z"
             }, indent=2)
+            self.get_logger().error(f"Detection error: {e}")
+            import traceback
+            self.get_logger().error(traceback.format_exc())
+        
+        return response
+
+    def detect_objects_callback(self, request, response):
+        """Service callback for /vision/detect_objects - returns detection results directly"""
+        try:
+            # Use captured frame instead of latest_rgb for consistency
+            frame_to_use = self.captured_frame if self.frame_captured else self.latest_rgb
+            
+            if frame_to_use is None:
+                response.success = False
+                response.total_detections = 0
+                response.object_ids = []
+                response.bbox_x1 = []
+                response.bbox_y1 = []
+                response.bbox_x2 = []
+                response.bbox_y2 = []
+                response.confidences = []
+                response.distances_cm = []
+                response.error_message = "No image available from /camera/image_raw"
+                self.get_logger().warn("No image received yet")
+                return response
+            
+            self.get_logger().info("Running SAM detection and returning results...")
+            
+            # Run detection on captured frame
+            self.latest_detections = self._detect_objects(frame_to_use)
+            
+            # Build parallel arrays for response
+            object_ids = []
+            bbox_x1 = []
+            bbox_y1 = []
+            bbox_x2 = []
+            bbox_y2 = []
+            confidences = []
+            distances_cm = []
+            
+            for det in self.latest_detections:
+                object_ids.append(det['id'])
+                bbox = det['bbox']
+                bbox_x1.append(bbox[0])
+                bbox_y1.append(bbox[1])
+                bbox_x2.append(bbox[2])
+                bbox_y2.append(bbox[3])
+                confidences.append(float(det['confidence']))
+                
+                # Add distance if available
+                distance = det.get('distance_cm')
+                distances_cm.append(float(distance) if distance is not None else -1.0)
+            
+            # Build response
+            response.success = True
+            response.total_detections = len(self.latest_detections)
+            response.object_ids = object_ids
+            response.bbox_x1 = bbox_x1
+            response.bbox_y1 = bbox_y1
+            response.bbox_x2 = bbox_x2
+            response.bbox_y2 = bbox_y2
+            response.confidences = confidences
+            response.distances_cm = distances_cm
+            response.error_message = ""
+            
+            self.get_logger().info(f"Detection complete: {len(self.latest_detections)} objects found")
+            
+            # Print bounding boxes
+            self.get_logger().info("Bounding Boxes:")
+            for i in range(len(object_ids)):
+                self.get_logger().info(
+                    f"  {object_ids[i]}: bbox=[{bbox_x1[i]}, {bbox_y1[i]}, {bbox_x2[i]}, {bbox_y2[i]}], "
+                    f"conf={confidences[i]:.2f}, dist={distances_cm[i]:.1f}cm"
+                )
+            
+        except Exception as e:
+            response.success = False
+            response.total_detections = 0
+            response.object_ids = []
+            response.bbox_x1 = []
+            response.bbox_y1 = []
+            response.bbox_x2 = []
+            response.bbox_y2 = []
+            response.confidences = []
+            response.distances_cm = []
+            response.error_message = str(e)
             self.get_logger().error(f"Detection error: {e}")
             import traceback
             self.get_logger().error(traceback.format_exc())

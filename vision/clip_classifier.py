@@ -10,17 +10,18 @@ Services:
     2. /vision/classify_bb
        Classify specific bounding box region [x1,y1,x2,y2]
        ros2 service call /vision/classify_bb custom_interfaces/srv/ClassifyBBox "{x1: 100, y1: 100, x2: 200, y2: 300}"
-    
-    3. Auto-classification via SAM subscription (pipeline)
+
+    3. /vision/run_pipeline
+       Trigger the entire pipeline
+       ros2 service call /vision/run_pipeline std_srvs/srv/Trigger
        Subscribes to /vision/sam_detections (SAMDetections message)
        Automatically classifies each detected bounding box when SAM publishes
        No service call needed - automatic when SAM publishes
-       ros2 service call /vision/detect_objects std_srvs/srv/Trigger
+       ros2 service call /vision/run_pipeline std_srvs/srv/Trigger
 
 Setup:
     Terminal 1: ros2 run vision simple_sam_detector
     Terminal 2: ros2 run vision clip_classifier
-
 """
 
 import rclpy
