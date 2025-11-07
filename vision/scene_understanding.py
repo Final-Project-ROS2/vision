@@ -881,7 +881,7 @@ class SceneUnderstandingNode(Node):
                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
             cv2.putText(display_img, "ros2 service call /vision/understand_scene std_srvs/srv/Trigger", (10, 60),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
-            cv2.putText(display_img, "Can be called multiple times to update", (10, 90),
+            cv2.putText(display_img, "-", (10, 90),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (150, 255, 150), 1)
             cv2.imshow(self.window_name, display_img)
             cv2.waitKey(1)
