@@ -77,42 +77,6 @@ source install/setup.bash
 ```
 
 
-**[SAM ONLY]** - simple_sam_detector.py
-
-```bash
-#Terminal 1 Usage
-    ros2 run vision simple_sam_detector                    # Continuous mode
-    ros2 run vision simple_sam_detector --single           # Single shot mode
-
-#Terminal 2 Service
-   ros2 service call /vision/detect_objects std_srvs/srv/Trigger
-```
-**[CLIP ONLY]** - clip_classifier.py
-
-```bash
-# Terminal 1: SAM Detector
-ros2 run vision simple_sam_detector
-
-# Terminal 2: CLIP Classifier  
-ros2 run vision clip_classifier
-
-# Terminal 3: CLIP sevice Call
-ros2 service call /vision/classify_detect std_srvs/srv/Trigger
-```
-
-
-**[GRASP ONLY]** - graspnet_detection.py -> /camera/depth/image_raw
-
-```bash
-# Run GraspNet detector
-ros2 run vision graspnet_detector
-
-# Detect grasps (in another terminal)
-ros2 service call /vision/detect_grasps std_srvs/srv/Trigger
-```
-
-
-
 vision vnev setting in final_project_ws
 ```bash
 source vision_venv/bin/activate
@@ -129,3 +93,135 @@ Verify the custom interface
 ros2 interface show custom_interfaces/msg/SAMDetection
 ros2 interface show custom_interfaces/msg/SAMDetections
 ```
+
+
+
+---
+
+# 🧠 Vision AI ROS2 Pipeline
+
+This project integrates **SAM**, **CLIP**, **GraspNet**, and **Scene Understanding** into a complete ROS2-based vision perception pipeline.
+Each module communicates via **ROS2 services** and **topics**.
+
+All functions are **services** (called on demand), except `/vision/run_pipeline`, which acts as a **continuous pipeline trigger** (message-based, called once to start full pipeline flow).
+
+---
+
+## 📦 Overview
+
+| Node                    | Role                                                         | Key Topics/Services                                                                                    |
+| ----------------------- | ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------ |
+| **simple_sam_detector** | Detects objects and publishes regions for downstream modules | `/vision/run_pipeline`, `/vision/detect_objects`, `/vision/show_depth_image`, `/vision/sam_detections` |
+| **clip_classifier**     | Classifies detected regions (using CLIP model)               | `/vision/classify_all`, `/vision/classify_bb`, subscribes to `/vision/sam_detections`                  |
+| **graspnet_detector**   | Estimates grasp poses for detected objects                   | `/vision/detect_grasp`, `/vision/detect_grasp_bb`, subscribes to `/vision/sam_detections`              |
+| **scene_understanding** | Analyzes scene relationships and context                     | `/vision/understand_scene`, subscribes to `/vision/sam_detections`                                     |
+
+---
+
+## ⚙️ Node Details
+
+### 1. **SAM Detector Node (`simple_sam_detector`)**
+
+Detects objects using SAM (Segment Anything Model).
+
+**Services**
+
+| Name                       | Description                                                                       | Example                                                                        |
+| -------------------------- | --------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| `/vision/run_pipeline`     | Trigger full SAM pipeline and continuously publish to `/vision/sam_detections`    | `ros2 service call /vision/run_pipeline std_srvs/srv/Trigger`                  |
+| `/vision/detect_objects`   | Detect objects in one frame and return bounding boxes, confidences, and distances | `ros2 service call /vision/detect_objects custom_interfaces/srv/DetectObjects` |
+| `/vision/show_depth_image` | Display depth camera visualization                                                | `ros2 service call /vision/show_depth_image std_srvs/srv/Trigger`              |
+
+**Setup**
+
+```
+Terminal 1: ros2 run vision simple_sam_detector
+```
+
+---
+
+### 2. **CLIP Vision Classifier Node (`clip_classifier`)**
+
+Classifies image regions using the CLIP model.
+
+**Services**
+
+| Name                   | Description                                                                          | Example                                                                                                           |
+| ---------------------- | ------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------- |
+| `/vision/classify_all` | Classify the entire camera frame                                                     | `ros2 service call /vision/classify_all std_srvs/srv/Trigger`                                                     |
+| `/vision/classify_bb`  | Classify a specific bounding box region                                              | `ros2 service call /vision/classify_bb custom_interfaces/srv/ClassifyBBox "{x1: 100, y1: 100, x2: 200, y2: 300}"` |
+| `/vision/run_pipeline` | Subscribes to `/vision/sam_detections` and automatically classifies detected regions | `ros2 service call /vision/run_pipeline std_srvs/srv/Trigger`                                                     |
+
+**Setup**
+
+```
+Terminal 1: ros2 run vision simple_sam_detector
+Terminal 2: ros2 run vision clip_classifier
+```
+
+---
+
+### 3. **GraspNet Detector Node (`graspnet_detector`)**
+
+Estimates grasp poses for detected objects using GraspNet.
+
+**Services**
+
+| Name                      | Description                                                                   | Example                                                                                                                  |
+| ------------------------- | ----------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| `/vision/detect_grasp`    | Compute grasp poses for all detected objects                                  | `ros2 service call /vision/detect_grasp custom_interfaces/srv/DetectGrasps`                                              |
+| `/vision/detect_grasp_bb` | Compute grasp pose within a specific bounding box                             | `ros2 service call /vision/detect_grasp_bb custom_interfaces/srv/DetectGraspBBox "{x1: 100, y1: 100, x2: 200, y2: 300}"` |
+| `/vision/run_pipeline`    | Subscribes to `/vision/sam_detections` and automatically runs grasp detection | `ros2 service call /vision/run_pipeline std_srvs/srv/Trigger`                                                            |
+
+**Setup**
+
+```
+Terminal 1: ros2 run vision simple_sam_detector
+Terminal 2: ros2 run vision clip_classifier
+Terminal 3: ros2 run vision graspnet_detector
+```
+
+---
+
+### 4. **Scene Understanding Node (`scene_understanding`)**
+
+Analyzes spatial relationships and context between detected objects.
+
+**Services**
+
+| Name                       | Description                                                               | Example                                                                            |
+| -------------------------- | ------------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
+| `/vision/understand_scene` | Get scene-level understanding (calls `/vision/detect_objects` internally) | `ros2 service call /vision/understand_scene custom_interfaces/srv/UnderstandScene` |
+| `/vision/run_pipeline`     | Subscribes to `/vision/sam_detections` and runs full scene analysis       | `ros2 service call /vision/run_pipeline std_srvs/srv/Trigger`                      |
+
+**Publishes**
+
+* `/vision/scene_understanding` → `SceneUnderstanding` message
+
+**Setup**
+
+```
+Terminal 1: ros2 run vision simple_sam_detector
+Terminal 2: ros2 run vision clip_classifier
+Terminal 3: ros2 run vision graspnet_detector
+Terminal 4: ros2 run vision scene_understanding
+```
+
+---
+
+## 🧩 Pipeline Flow Summary
+
+```
+SAM → CLIP → GraspNet → Scene Understanding
+```
+
+* `/vision/run_pipeline` triggers continuous message flow
+* Each downstream node subscribes to `/vision/sam_detections`
+* All other services are **on-demand** (per-frame or per-request basis)
+
+---
+
+
+
+
+
