@@ -6,7 +6,7 @@ Services:
     1. /vision/understand_scene
        Analyze spatial relationships from all detected objects
        Calls /vision/detect_objects internally to get bounding boxes + labels
-       ros2 service call /vision/understand_scene custom_interfaces/srv/UnderstandScene
+       ros2 service call /vision/understand_scene std_srvs/srv/Trigger
     
     2. /vision/run_pipeline
        Run complete pipeline: SAM + CLIP + GraspNet + Scene Understanding
@@ -34,6 +34,7 @@ from cv_bridge import CvBridge
 import cv2
 import numpy as np
 import json
+import time
 from datetime import datetime
 from typing import List, Dict, Tuple
 from collections import Counter
@@ -164,20 +165,13 @@ class SceneUnderstandingNode(Node):
             )
         
         # Create scene understanding services
-        if CUSTOM_INTERFACES_AVAILABLE:
-            self.understand_service = self.create_service(
-                UnderstandScene,
-                '/vision/understand_scene',
-                self.understand_scene_callback,
-                callback_group=self.callback_group
-            )
-        else:
-            self.understand_service = self.create_service(
-                Trigger,
-                '/vision/understand_scene',
-                self.understand_scene_callback,
-                callback_group=self.callback_group
-            )
+        # Always use Trigger for /vision/understand_scene to ensure compatibility
+        self.understand_service = self.create_service(
+            Trigger,
+            '/vision/understand_scene',
+            self.understand_scene_callback,
+            callback_group=self.callback_group
+        )
         
         self.pipeline_service = self.create_service(
             Trigger,
@@ -211,7 +205,7 @@ class SceneUnderstandingNode(Node):
             self.get_logger().info("Publishing to: /vision/scene_understanding")
         self.get_logger().info("=" * 80)
         self.get_logger().info("Usage:")
-        self.get_logger().info("  ros2 service call /vision/understand_scene custom_interfaces/srv/UnderstandScene")
+        self.get_logger().info("  ros2 service call /vision/understand_scene std_srvs/srv/Trigger")
         self.get_logger().info("  ros2 service call /vision/run_pipeline std_srvs/srv/Trigger")
         self.get_logger().info("=" * 80)
     
@@ -236,35 +230,49 @@ class SceneUnderstandingNode(Node):
             self.get_logger().error(traceback.format_exc())
     
     def understand_scene_callback(self, request, response):
-        """Service callback for /vision/understand_scene"""
+        """Service callback for /vision/understand_scene - uses Trigger service"""
         try:
+            self.get_logger().info("=" * 60)
+            self.get_logger().info("Scene Understanding Service Called - Analyzing...")
+            self.get_logger().info("=" * 60)
+            
             if not CUSTOM_INTERFACES_AVAILABLE:
                 response.success = False
                 response.message = json.dumps({
                     "success": False,
-                    "error": "Custom interfaces not available",
+                    "error": "Custom interfaces not available. Build custom_interfaces package first.",
                     "timestamp": datetime.utcnow().isoformat() + "Z"
                 }, indent=2)
+                self.get_logger().error("Custom interfaces not available")
                 return response
-            
-            self.get_logger().info("Analyzing scene relationships...")
             
             # Call /vision/detect_objects to get all detections
             if not self.detect_objects_client.wait_for_service(timeout_sec=5.0):
                 response.success = False
-                response.scene = SceneUnderstanding()
-                response.error_message = "/vision/detect_objects service not available"
+                response.message = json.dumps({
+                    "success": False,
+                    "error": "/vision/detect_objects service not available",
+                    "timestamp": datetime.utcnow().isoformat() + "Z"
+                }, indent=2)
                 self.get_logger().error("/vision/detect_objects service not available")
                 return response
             
             detect_request = DetectObjects.Request()
             future = self.detect_objects_client.call_async(detect_request)
-            rclpy.spin_until_future_complete(self, future, timeout_sec=10.0)
+            
+            # Wait for future with timeout using executor
+            start_time = time.time()
+            timeout = 10.0
+            while not future.done() and (time.time() - start_time) < timeout:
+                time.sleep(0.01)  # Small sleep to prevent busy waiting
             
             if not future.done():
                 response.success = False
-                response.scene = SceneUnderstanding()
-                response.error_message = "/vision/detect_objects service call timeout"
+                response.message = json.dumps({
+                    "success": False,
+                    "error": "/vision/detect_objects service call timeout",
+                    "timestamp": datetime.utcnow().isoformat() + "Z"
+                }, indent=2)
                 self.get_logger().error("Service call timeout")
                 return response
             
@@ -272,8 +280,11 @@ class SceneUnderstandingNode(Node):
             
             if not detect_response.success:
                 response.success = False
-                response.scene = SceneUnderstanding()
-                response.error_message = f"Object detection failed: {detect_response.error_message}"
+                response.message = json.dumps({
+                    "success": False,
+                    "error": f"Object detection failed: {detect_response.error_message}",
+                    "timestamp": datetime.utcnow().isoformat() + "Z"
+                }, indent=2)
                 self.get_logger().error(f"Object detection failed: {detect_response.error_message}")
                 return response
             
@@ -284,7 +295,12 @@ class SceneUnderstandingNode(Node):
                 if self.detect_grasps_client.wait_for_service(timeout_sec=2.0):
                     grasp_request = DetectGrasps.Request()
                     grasp_future = self.detect_grasps_client.call_async(grasp_request)
-                    rclpy.spin_until_future_complete(self, grasp_future, timeout_sec=10.0)
+                    
+                    # Wait for future with timeout
+                    start_time = time.time()
+                    timeout = 10.0
+                    while not grasp_future.done() and (time.time() - start_time) < timeout:
+                        time.sleep(0.01)
                     
                     if grasp_future.done():
                         grasp_response = grasp_future.result()
@@ -310,16 +326,33 @@ class SceneUnderstandingNode(Node):
             if self.latest_rgb is not None:
                 self._visualize_scene(self.latest_rgb, scene)
             
+            # Create success response
             response.success = True
-            response.scene = scene
-            response.error_message = ""
+            response.message = json.dumps({
+                "success": True,
+                "scene_id": scene.scene_id,
+                "total_objects": scene.total_objects,
+                "total_relations": len(scene.all_relations),
+                "graspable_objects": scene.graspable_objects,
+                "scene_description": scene.scene_description,
+                "timestamp": datetime.utcnow().isoformat() + "Z"
+            }, indent=2)
             
-            self.get_logger().info(f"Scene analysis complete: {scene.total_objects} objects, {len(scene.all_relations)} relations")
+            self.get_logger().info("=" * 60)
+            self.get_logger().info(f"✓ Scene Analysis Complete!")
+            self.get_logger().info(f"  Objects: {scene.total_objects}")
+            self.get_logger().info(f"  Relations: {len(scene.all_relations)}")
+            self.get_logger().info(f"  Graspable: {scene.graspable_objects}")
+            self.get_logger().info(f"  Description: {scene.scene_description}")
+            self.get_logger().info("=" * 60)
             
         except Exception as e:
             response.success = False
-            response.scene = SceneUnderstanding()
-            response.error_message = str(e)
+            response.message = json.dumps({
+                "success": False,
+                "error": str(e),
+                "timestamp": datetime.utcnow().isoformat() + "Z"
+            }, indent=2)
             self.get_logger().error(f"Scene understanding error: {e}")
             import traceback
             self.get_logger().error(traceback.format_exc())
@@ -363,7 +396,12 @@ class SceneUnderstandingNode(Node):
             
             detect_request = DetectObjects.Request()
             future = self.detect_objects_client.call_async(detect_request)
-            rclpy.spin_until_future_complete(self, future, timeout_sec=10.0)
+            
+            # Wait for future with timeout
+            start_time = time.time()
+            timeout = 10.0
+            while not future.done() and (time.time() - start_time) < timeout:
+                time.sleep(0.01)
             
             if not future.done() or not future.result().success:
                 self.get_logger().warn("Failed to get object detections for scene analysis")
@@ -377,7 +415,12 @@ class SceneUnderstandingNode(Node):
                 if self.detect_grasps_client.wait_for_service(timeout_sec=2.0):
                     grasp_request = DetectGrasps.Request()
                     grasp_future = self.detect_grasps_client.call_async(grasp_request)
-                    rclpy.spin_until_future_complete(self, grasp_future, timeout_sec=10.0)
+                    
+                    # Wait for future with timeout
+                    start_time = time.time()
+                    timeout = 10.0
+                    while not grasp_future.done() and (time.time() - start_time) < timeout:
+                        time.sleep(0.01)
                     
                     if grasp_future.done():
                         grasp_response = grasp_future.result()
@@ -836,8 +879,10 @@ class SceneUnderstandingNode(Node):
             display_img = self.latest_rgb.copy()
             cv2.putText(display_img, "Call service to analyze scene", (10, 30),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
-            cv2.putText(display_img, "ros2 service call /vision/understand_scene custom_interfaces/srv/UnderstandScene", (10, 60),
+            cv2.putText(display_img, "ros2 service call /vision/understand_scene std_srvs/srv/Trigger", (10, 60),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
+            cv2.putText(display_img, "Can be called multiple times to update", (10, 90),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, (150, 255, 150), 1)
             cv2.imshow(self.window_name, display_img)
             cv2.waitKey(1)
             return

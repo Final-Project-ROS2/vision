@@ -6,8 +6,7 @@ Services:
     1. /vision/detect_grasp
        Use bounding boxes from /vision/detect_objects to find grasp pose for each object
        Returns grasp poses for all detected objects
-       ros2 service call /vision/detect_grasp std_srvs/srv/Trigger      custom_interfaces/srv/DetectGrasps
-       error:  total_grasps=0, grasp_poses=[], error_message='/vision/detect_objects service call timeout')
+       ros2 service call /vision/detect_grasp std_srvs/srv/Trigger
 
     2. /vision/detect_grasp_bb
        Find grasp position in specific bounding box region [x1,y1,x2,y2]
@@ -179,25 +178,19 @@ class GraspNetDetector(Node):
             )
         
         # Create grasp detection services
+        # Always use Trigger for /vision/detect_grasp to ensure compatibility
+        self.grasp_service = self.create_service(
+            Trigger,
+            '/vision/detect_grasp',
+            self.detect_grasp_callback,
+            callback_group=self.callback_group
+        )
+        
         if CUSTOM_INTERFACES_AVAILABLE:
-            self.grasp_service = self.create_service(
-                DetectGrasps,
-                '/vision/detect_grasp',
-                self.detect_grasp_callback,
-                callback_group=self.callback_group
-            )
-            
             self.grasp_bb_service = self.create_service(
                 DetectGraspBBox,
                 '/vision/detect_grasp_bb',
                 self.detect_grasp_bb_callback,
-                callback_group=self.callback_group
-            )
-        else:
-            self.grasp_service = self.create_service(
-                Trigger,
-                '/vision/detect_grasp',
-                self.detect_grasp_callback,
                 callback_group=self.callback_group
             )
         
@@ -235,7 +228,7 @@ class GraspNetDetector(Node):
         self.get_logger().info("Publishing to: /vision/grasp_poses")
         self.get_logger().info("=" * 80)
         self.get_logger().info("Usage:")
-        self.get_logger().info("  ros2 service call /vision/detect_grasp custom_interfaces/srv/DetectGrasps")
+        self.get_logger().info("  ros2 service call /vision/detect_grasp std_srvs/srv/Trigger")
         if CUSTOM_INTERFACES_AVAILABLE:
             self.get_logger().info("  ros2 service call /vision/detect_grasp_bb custom_interfaces/srv/DetectGraspBBox \"{x1: 100, y1: 100, x2: 200, y2: 300}\"")
         self.get_logger().info("=" * 80)
@@ -369,21 +362,29 @@ class GraspNetDetector(Node):
             self.get_logger().error(traceback.format_exc())
     
     def detect_grasp_callback(self, request, response):
-        """Service callback for /vision/detect_grasp - uses /vision/detect_objects"""
+        """Service callback for /vision/detect_grasp - uses Trigger service"""
         try:
+            self.get_logger().info("=" * 60)
+            self.get_logger().info("Grasp Detection Service Called")
+            self.get_logger().info("=" * 60)
+            
             if not CUSTOM_INTERFACES_AVAILABLE or self.detect_objects_client is None:
                 response.success = False
-                response.total_grasps = 0
-                response.grasp_poses = []
-                response.error_message = "Custom interfaces not available or detect_objects service not found"
+                response.message = json.dumps({
+                    "success": False,
+                    "error": "Custom interfaces not available or detect_objects service not found",
+                    "timestamp": datetime.utcnow().isoformat() + "Z"
+                }, indent=2)
                 self.get_logger().error("Custom interfaces not available")
                 return response
             
             if self.captured_rgb is None or self.captured_depth is None:
                 response.success = False
-                response.total_grasps = 0
-                response.grasp_poses = []
-                response.error_message = "No RGB-D data available. Waiting for camera..."
+                response.message = json.dumps({
+                    "success": False,
+                    "error": "No RGB-D data available. Waiting for camera...",
+                    "timestamp": datetime.utcnow().isoformat() + "Z"
+                }, indent=2)
                 self.get_logger().warn("No RGB-D data captured yet")
                 return response
             
@@ -392,21 +393,30 @@ class GraspNetDetector(Node):
             
             if not self.detect_objects_client.wait_for_service(timeout_sec=5.0):
                 response.success = False
-                response.total_grasps = 0
-                response.grasp_poses = []
-                response.error_message = "/vision/detect_objects service not available"
+                response.message = json.dumps({
+                    "success": False,
+                    "error": "/vision/detect_objects service not available",
+                    "timestamp": datetime.utcnow().isoformat() + "Z"
+                }, indent=2)
                 self.get_logger().error("/vision/detect_objects service not available")
                 return response
             
             detect_request = DetectObjects.Request()
             future = self.detect_objects_client.call_async(detect_request)
-            rclpy.spin_until_future_complete(self, future, timeout_sec=10.0)
+            
+            # Wait for future with timeout
+            start_time = time.time()
+            timeout = 10.0
+            while not future.done() and (time.time() - start_time) < timeout:
+                time.sleep(0.01)
             
             if not future.done():
                 response.success = False
-                response.total_grasps = 0
-                response.grasp_poses = []
-                response.error_message = "/vision/detect_objects service call timeout"
+                response.message = json.dumps({
+                    "success": False,
+                    "error": "/vision/detect_objects service call timeout",
+                    "timestamp": datetime.utcnow().isoformat() + "Z"
+                }, indent=2)
                 self.get_logger().error("Service call timeout")
                 return response
             
@@ -414,14 +424,17 @@ class GraspNetDetector(Node):
             
             if not detect_response.success:
                 response.success = False
-                response.total_grasps = 0
-                response.grasp_poses = []
-                response.error_message = f"Object detection failed: {detect_response.error_message}"
+                response.message = json.dumps({
+                    "success": False,
+                    "error": f"Object detection failed: {detect_response.error_message}",
+                    "timestamp": datetime.utcnow().isoformat() + "Z"
+                }, indent=2)
                 self.get_logger().error(f"Object detection failed: {detect_response.error_message}")
                 return response
             
             # Extract bboxes from detection response
             bboxes = []
+            object_ids = []
             for i in range(detect_response.total_detections):
                 bbox = [
                     detect_response.bbox_x1[i],
@@ -430,48 +443,49 @@ class GraspNetDetector(Node):
                     detect_response.bbox_y2[i]
                 ]
                 bboxes.append(bbox)
+                object_ids.append(detect_response.object_ids[i])
             
             self.get_logger().info(f"Detected {len(bboxes)} objects, finding grasps...")
             
+            # Store all bboxes for visualization (even those without grasps)
+            self.latest_all_bboxes = bboxes
+            self.latest_all_object_ids = object_ids
+            
             # Detect grasps for each bounding box
             all_grasps = []
-            grasp_poses_msgs = []
+            grasp_data = []
             
             for i, bbox in enumerate(bboxes):
                 grasps = self._detect_grasps_in_bbox(self.captured_rgb, self.captured_depth, bbox)
                 
-                for grasp in grasps:
-                    grasp['object_id'] = detect_response.object_ids[i]
-                    grasp['bbox'] = bbox
-                    all_grasps.append(grasp)
-                    
-                    # Create GraspPose message
-                    grasp_msg = GraspPose()
-                    grasp_msg.object_id = detect_response.object_ids[i]
-                    grasp_msg.bbox = bbox
-                    
-                    pos = grasp['position']
-                    grasp_msg.position.x = float(pos['x'])
-                    grasp_msg.position.y = float(pos['y'])
-                    grasp_msg.position.z = float(pos['z'])
-                    
-                    ori = grasp['orientation']
-                    grasp_msg.orientation.x = float(ori['x'])
-                    grasp_msg.orientation.y = float(ori['y'])
-                    grasp_msg.orientation.z = float(ori['z'])
-                    grasp_msg.orientation.w = float(ori['w'])
-                    
-                    grasp_msg.quality_score = float(grasp['quality_score'])
-                    grasp_msg.width = float(grasp['grasp_width'])
-                    grasp_msg.approach_direction = "top"
-                    
-                    grasp_poses_msgs.append(grasp_msg)
+                if grasps:
+                    for grasp in grasps:
+                        grasp['object_id'] = object_ids[i]
+                        grasp['bbox'] = bbox
+                        all_grasps.append(grasp)
+                        
+                        # Store grasp data for JSON response
+                        grasp_data.append({
+                            "object_id": object_ids[i],
+                            "bbox": bbox,
+                            "position": grasp['position'],
+                            "orientation": grasp['orientation'],
+                            "quality_score": grasp['quality_score'],
+                            "grasp_width": grasp['grasp_width'],
+                            "approach_angle": grasp['approach_angle']
+                        })
+                else:
+                    self.get_logger().warn(f"No grasps found for object {object_ids[i]} at bbox {bbox}")
             
             if not all_grasps:
+                # Still store bboxes for visualization even if no grasps
                 response.success = False
-                response.total_grasps = 0
-                response.grasp_poses = []
-                response.error_message = "No grasps detected in any bounding box"
+                response.message = json.dumps({
+                    "success": False,
+                    "error": "No grasps detected in any bounding box",
+                    "total_objects": len(bboxes),
+                    "timestamp": datetime.utcnow().isoformat() + "Z"
+                }, indent=2)
                 self.get_logger().warn("No grasps detected")
                 return response
             
@@ -482,17 +496,29 @@ class GraspNetDetector(Node):
             self._publish_grasp_poses(all_grasps)
             
             response.success = True
-            response.total_grasps = len(grasp_poses_msgs)
-            response.grasp_poses = grasp_poses_msgs
-            response.error_message = ""
+            response.message = json.dumps({
+                "success": True,
+                "total_grasps": len(all_grasps),
+                "total_objects": len(bboxes),
+                "objects_with_grasps": len(set([g['object_id'] for g in all_grasps])),
+                "grasps": grasp_data,
+                "timestamp": datetime.utcnow().isoformat() + "Z"
+            }, indent=2)
             
-            self.get_logger().info(f"Grasp detection complete: {len(all_grasps)} grasps found")
+            self.get_logger().info("=" * 60)
+            self.get_logger().info(f"✓ Grasp Detection Complete!")
+            self.get_logger().info(f"  Total Objects: {len(bboxes)}")
+            self.get_logger().info(f"  Objects with Grasps: {len(set([g['object_id'] for g in all_grasps]))}")
+            self.get_logger().info(f"  Total Grasps: {len(all_grasps)}")
+            self.get_logger().info("=" * 60)
             
         except Exception as e:
             response.success = False
-            response.total_grasps = 0
-            response.grasp_poses = []
-            response.error_message = str(e)
+            response.message = json.dumps({
+                "success": False,
+                "error": str(e),
+                "timestamp": datetime.utcnow().isoformat() + "Z"
+            }, indent=2)
             self.get_logger().error(f"Grasp detection error: {e}")
             import traceback
             self.get_logger().error(traceback.format_exc())
@@ -1141,21 +1167,48 @@ class GraspNetDetector(Node):
         
         # Check if we have full image grasps
         elif self.latest_grasps:
+            # Group grasps by object_id to show them more clearly
+            grasps_by_object = {}
+            for grasp in self.latest_grasps:
+                obj_id = grasp.get('object_id', 'unknown')
+                if obj_id not in grasps_by_object:
+                    grasps_by_object[obj_id] = []
+                grasps_by_object[obj_id].append(grasp)
+            
             colors = [
                 (0, 255, 0), (255, 255, 0), (0, 255, 255), (255, 0, 255),
-                (255, 128, 0), (0, 128, 255), (255, 0, 128), (128, 255, 0)
+                (255, 128, 0), (0, 128, 255), (255, 0, 128), (128, 255, 0),
+                (128, 128, 255), (255, 128, 128)
             ]
             
-            for i, grasp in enumerate(self.latest_grasps[:8]):
+            # Draw grasps grouped by object (show only best grasp per object for clarity)
+            obj_idx = 0
+            total_grasps_shown = 0
+            for obj_id, obj_grasps in grasps_by_object.items():
+                if obj_idx >= len(colors):
+                    break
+                    
+                color = colors[obj_idx]
+                
+                # Draw bounding box if available
+                if obj_grasps and 'bbox' in obj_grasps[0]:
+                    bbox = obj_grasps[0]['bbox']
+                    cv2.rectangle(display_img, (bbox[0], bbox[1]), (bbox[2], bbox[3]), color, 2)
+                    
+                    # Draw object label at top of bbox
+                    label_obj = f"{obj_id} ({len(obj_grasps)}g)"
+                    cv2.putText(display_img, label_obj, (bbox[0], bbox[1] - 5),
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+                
+                # Show only the best grasp (first one, highest quality) for each object
+                grasp = obj_grasps[0]
                 px, py = grasp["pixel_location"]
                 quality = grasp["quality_score"]
                 angle = grasp["approach_angle"]
                 
-                color = colors[i % len(colors)]
-                
                 # Draw grasp center
-                cv2.circle(display_img, (px, py), 5, color, -1)
-                cv2.circle(display_img, (px, py), 7, (255, 255, 255), 2)
+                cv2.circle(display_img, (px, py), 6, color, -1)
+                cv2.circle(display_img, (px, py), 8, (255, 255, 255), 2)
                 
                 # Draw grasp orientation
                 length = 40
@@ -1173,15 +1226,18 @@ class GraspNetDetector(Node):
                 py2 = int(py - width/2 * np.sin(perp_angle))
                 cv2.line(display_img, (px1, py1), (px2, py2), color, 2)
                 
-                # Draw label
-                label = f"#{i}: Q={quality:.2f}"
-                cv2.putText(display_img, label, (px + 10, py - 10),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+                # Draw quality label
+                label = f"Q={quality:.2f}"
+                cv2.putText(display_img, label, (px + 10, py + 5),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 2)
+                
+                obj_idx += 1
+                total_grasps_shown += 1
             
-            # Add title
-            title = f"GraspNet | Grasps: {len(self.latest_grasps)}"
+            # Add title with object count
+            title = f"GraspNet | Objects: {len(grasps_by_object)} | Total Grasps: {len(self.latest_grasps)} (showing best per object)"
             cv2.putText(display_img, title, (10, 30),
-                       cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2)
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
         
         else:
             # No grasps detected yet
