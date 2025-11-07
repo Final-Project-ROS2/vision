@@ -22,6 +22,9 @@ Setup:
     Terminal 2: ros2 run vision clip_classifier
     Terminal 3: ros2 run vision graspnet_detector
     Terminal 4: ros2 run vision scene_understanding
+
+    ros2 launch ur_yt_sim spawn_ur5_camera_gripper_moveit.launch.py 
+
 """
 
 import rclpy
