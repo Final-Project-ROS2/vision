@@ -6,7 +6,7 @@ Services:
     1. /vision/detect_grasp
        Use bounding boxes from /vision/detect_objects to find grasp pose for each object
        Returns grasp poses for all detected objects
-       ros2 service call /vision/detect_grasp custom_interfaces/srv/DetectGrasps
+       ros2 service call /vision/detect_grasp std_srvs/srv/Trigger      custom_interfaces/srv/DetectGrasps
        error:  total_grasps=0, grasp_poses=[], error_message='/vision/detect_objects service call timeout')
 
     2. /vision/detect_grasp_bb

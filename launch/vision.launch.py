@@ -6,22 +6,40 @@ import os
 def generate_launch_description():
     ld = LaunchDescription()
 
-    show_rgb_image_node = Node(
+    simple_sam_detector_node = Node(
         package='vision',
-        executable='show_rgb_image',
-        name='show_rgb_image_node',
+        executable='simple_sam_detector',
+        name='simple_sam_detector_node',
         output='screen',
         emulate_tty=True
     )
-    ld.add_action(show_rgb_image_node)
+    ld.add_action(simple_sam_detector_node)
 
-    show_depth_image_node = Node(
+    clip_classifier_node = Node(
         package='vision',
-        executable='show_depth_image',
-        name='show_depth_image_node',
+        executable='clip_classifier',
+        name='clip_classifier_node',
         output='screen',
         emulate_tty=True
     )
-    ld.add_action(show_depth_image_node)
+    ld.add_action(clip_classifier_node)
+
+    graspnet_detector_node = Node(
+        package='vision',
+        executable='graspnet_detector',
+        name='graspnet_detector_node',
+        output='screen',
+        emulate_tty=True
+    )
+    ld.add_action(graspnet_detector_node)
+
+    scene_understanding_node = Node(
+        package='vision',
+        executable='scene_understanding',
+        name='scene_understanding_node',
+        output='screen',
+        emulate_tty=True
+    )
+    ld.add_action(scene_understanding_node)
 
     return ld

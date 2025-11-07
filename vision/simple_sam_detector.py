@@ -45,25 +45,7 @@ from typing import List, Dict, Tuple
 
 
 class SimpleSAMDetector(Node):
-    """
-    Simple SAM-based object detector
-    
-    Subscribes to:
-        - /camera/image_raw (RGB images from Gazebo camera)
-        - /camera/depth/image_raw (Depth images for distance estimation)
-    
-    Publishes:
-        - /vision/sam_detections (SAMDetections message with all detections)
-    
-    Services:
-        - /vision/run_pipeline (Trigger detection and publish to topic)
-        - /vision/detect_objects (Trigger detection and return results in response)
-        - /vision/show_depth_image (Display depth visualization)
-    
-    Display:
-        - Shows live camera feed with detections in OpenCV window
-    """
-    
+
     def __init__(self, single_shot_mode=False):
         super().__init__('simple_sam_detector')
         
