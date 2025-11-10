@@ -63,6 +63,25 @@ How it works:
   Shows debug visualization with pixel location and computed world coordinates.
 """
 
+
+"""
+# linear approx. formula
+# Given pixel coordinates (u, v) and depth d from sensor:
+
+# Step 1: Calculate pixel offset from origin
+du = u - 320  # Origin u-coordinate
+dv = v - 500  # Origin v-coordinate
+
+# Step 2: Apply scaling and sign conversion
+x = -dv * 0.001923  # scale_x = 0.5/260 ≈ 0.001923 m/pixel
+y = -du * 0.002     # scale_y = 0.03/15 = 0.002 m/pixel
+
+# Step 3: Convert depth to z-coordinate
+z = 0.8 + (depth_reference - d)  # depth_reference set on first call
+
+
+"""
+
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image, CameraInfo
