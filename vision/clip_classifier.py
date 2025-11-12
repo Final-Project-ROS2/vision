@@ -18,6 +18,10 @@ Services:
        Automatically classifies each detected bounding box when SAM publishes
        No service call needed - automatic when SAM publishes
        ros2 service call /vision/run_pipeline std_srvs/srv/Trigger
+    
+    4. /vision/find_object
+       Find bounding box by label name (runs CLIP classification automatically on SAM regions)
+       ros2 service call /vision/find_object custom_interfaces/srv/FindObject "{label: 'piston_rod'}"
 
 Setup:
     Terminal 1: ros2 run vision simple_sam_detector
@@ -106,6 +110,7 @@ class CLIPClassifier(Node):
         self.captured_frame = None  # Single captured frame for classification
         self.latest_classification = None
         self.latest_region_classifications = []  # For SAM auto-classification
+        self.latest_found_object = None  # For find_object service visualization
         self.frame_counter = 0
         self.frame_captured = False
         
@@ -152,6 +157,19 @@ class CLIPClassifier(Node):
                 self.classify_bb_callback_fallback
             )
         
+        # Find object by label service
+        if CUSTOM_INTERFACES_AVAILABLE:
+            try:
+                from custom_interfaces.srv import FindObject
+                self.find_object_service = self.create_service(
+                    FindObject,
+                    '/vision/find_object',
+                    self.find_object_callback
+                )
+                self.get_logger().info("Service created: /vision/find_object")
+            except ImportError:
+                self.get_logger().warn("FindObject service not available. Add to custom_interfaces.")
+        
         # Subscribe to live SAM detections for auto-classification
         if SAM_MSGS_AVAILABLE:
             self.sam_sub = self.create_subscription(
@@ -186,6 +204,7 @@ class CLIPClassifier(Node):
         self.get_logger().info(f"Device: {self.device}")
         self.get_logger().info(f"Service: /vision/classify_all")
         self.get_logger().info(f"Service: /vision/classify_bb")
+        self.get_logger().info(f"Service: /vision/find_object")
         self.get_logger().info(f"Subscriber: /vision/sam_detections (auto-classify on SAM publish)")
         self.get_logger().info(f"OpenCV Window: '{self.window_name}'")
     
@@ -453,6 +472,170 @@ class CLIPClassifier(Node):
             )
         except Exception as e:
             self.get_logger().error(f"Error handling placeholder SAM detections: {e}")
+    
+    def find_object_callback(self, request, response):
+        """
+        Service callback for /vision/find_object - find bounding box by label
+        Automatically runs CLIP classification on available SAM detections
+        
+        Custom Interface Definition (add to custom_interfaces/srv/FindObject.srv):
+        # Request
+        string label
+        ---
+        # Response
+        bool success
+        string message
+        int32[] bbox  # [x1, y1, x2, y2]
+        float32 confidence
+        """
+        try:
+            target_label = request.label.strip()
+            
+            if not target_label:
+                response.success = False
+                response.message = "Empty label provided"
+                response.bbox = []
+                response.confidence = 0.0
+                return response
+            
+            # Check if we have a captured frame
+            if self.captured_frame is None:
+                response.success = False
+                response.message = "No frame captured yet from /camera/image_raw"
+                response.bbox = []
+                response.confidence = 0.0
+                self.get_logger().warn("No captured frame available")
+                return response
+            
+            # Check if CLIP is available
+            if not CLIP_AVAILABLE or self.model is None:
+                response.success = False
+                response.message = "CLIP model not available"
+                response.bbox = []
+                response.confidence = 0.0
+                self.get_logger().error("CLIP model not available")
+                return response
+            
+            # If no classified regions, try to get SAM detections and classify them
+            if not self.latest_region_classifications:
+                self.get_logger().info("No classified regions available. Checking for SAM detections...")
+                
+                # Try calling SAM detection service to get fresh detections
+                try:
+                    sam_client = self.create_client(Trigger, '/vision/sam_detect')
+                    
+                    if not sam_client.wait_for_service(timeout_sec=2.0):
+                        response.success = False
+                        response.message = "SAM detection service not available. Please run simple_sam_detector first."
+                        response.bbox = []
+                        response.confidence = 0.0
+                        self.latest_found_object = None
+                        self.get_logger().warn("SAM service not available")
+                        return response
+                    
+                    # Call SAM service
+                    self.get_logger().info("Calling SAM detection service...")
+                    sam_request = Trigger.Request()
+                    future = sam_client.call_async(sam_request)
+                    rclpy.spin_until_future_complete(self, future, timeout_sec=5.0)
+                    
+                    if not future.done() or not future.result().success:
+                        response.success = False
+                        response.message = "SAM detection failed. Please check simple_sam_detector."
+                        response.bbox = []
+                        response.confidence = 0.0
+                        self.latest_found_object = None
+                        return response
+                    
+                    # Wait for SAM detections message to arrive
+                    self.get_logger().info("Waiting for SAM detections message...")
+                    time.sleep(0.5)
+                    
+                    # Check if we received detections via subscriber
+                    if not self.latest_region_classifications:
+                        response.success = False
+                        response.message = "No objects detected by SAM or classification failed."
+                        response.bbox = []
+                        response.confidence = 0.0
+                        self.latest_found_object = None
+                        return response
+                    
+                except Exception as e:
+                    self.get_logger().error(f"Error calling SAM service: {e}")
+                    response.success = False
+                    response.message = f"SAM service error: {str(e)}"
+                    response.bbox = []
+                    response.confidence = 0.0
+                    self.latest_found_object = None
+                    return response
+            
+            # Now search for the target label in classified regions
+            self.get_logger().info(f"Searching for '{target_label}' in {len(self.latest_region_classifications)} classified regions...")
+            
+            # Find all matching regions
+            matching_regions = []
+            for region in self.latest_region_classifications:
+                top_pred = region['top_prediction']
+                if top_pred['label'] == target_label:
+                    matching_regions.append({
+                        'bbox': region['bbox'],
+                        'confidence': top_pred['confidence'],
+                        'region_id': region['region_id']
+                    })
+            
+            # Check if any matches found
+            if not matching_regions:
+                response.success = False
+                response.message = f"Label '{target_label}' not found in classified regions"
+                response.bbox = []
+                response.confidence = 0.0
+                self.latest_found_object = None
+                self.get_logger().info(f"Label '{target_label}' not found")
+                return response
+            
+            # Sort by confidence and get highest
+            matching_regions.sort(key=lambda x: x['confidence'], reverse=True)
+            best_match = matching_regions[0]
+            
+            # Check confidence threshold
+            if best_match['confidence'] < 0.5:
+                response.success = False
+                response.message = f"Label '{target_label}' found but confidence too low ({best_match['confidence']:.2f} < 0.5)"
+                response.bbox = []
+                response.confidence = float(best_match['confidence'])
+                self.latest_found_object = None
+                self.get_logger().info(f"Label '{target_label}' confidence too low: {best_match['confidence']:.2f}")
+                return response
+            
+            # Store for visualization
+            self.latest_found_object = {
+                'label': target_label,
+                'bbox': best_match['bbox'],
+                'confidence': best_match['confidence'],
+                'region_id': best_match['region_id']
+            }
+            
+            # Return success with bbox
+            response.success = True
+            response.message = f"Found '{target_label}' with confidence {best_match['confidence']:.2f}"
+            response.bbox = best_match['bbox']
+            response.confidence = float(best_match['confidence'])
+            
+            self.get_logger().info(
+                f"Found '{target_label}': bbox={best_match['bbox']}, "
+                f"confidence={best_match['confidence']:.2f}, region_id={best_match['region_id']}"
+            )
+            
+        except Exception as e:
+            response.success = False
+            response.message = f"Error: {str(e)}"
+            response.bbox = []
+            response.confidence = 0.0
+            self.get_logger().error(f"Find object error: {e}")
+            import traceback
+            self.get_logger().error(traceback.format_exc())
+        
+        return response
     
     def _classify_image(self, rgb_image: np.ndarray) -> Dict:
         """
@@ -777,6 +960,73 @@ class CLIPClassifier(Node):
                 (255, 255, 255),
                 2
             )
+        
+        # Draw found object highlight (if available)
+        if self.latest_found_object:
+            found = self.latest_found_object
+            bbox = found['bbox']
+            
+            # Draw thick green bounding box for found object
+            cv2.rectangle(
+                vis_image,
+                (bbox[0], bbox[1]),
+                (bbox[2], bbox[3]),
+                (0, 255, 0),  # Green for found object
+                5
+            )
+            
+            # Prepare label text
+            label = f"FOUND: {found['label']}"
+            conf = f"Conf: {found['confidence']:.1%}"
+            
+            # Calculate label position (above bbox)
+            label_size, _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.9, 2)
+            
+            # Draw label background (green)
+            cv2.rectangle(
+                vis_image,
+                (bbox[0], bbox[1] - label_size[1] - 35),
+                (bbox[0] + max(label_size[0], 150), bbox[1]),
+                (0, 255, 0),
+                -1
+            )
+            
+            # Draw label text
+            cv2.putText(
+                vis_image,
+                label,
+                (bbox[0] + 5, bbox[1] - 15),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.9,
+                (0, 0, 0),
+                2
+            )
+            
+            # Draw confidence
+            cv2.putText(
+                vis_image,
+                conf,
+                (bbox[0] + 5, bbox[1] - 40),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.7,
+                (0, 0, 0),
+                2
+            )
+            
+            # Add corner markers
+            corner_size = 15
+            # Top-left
+            cv2.line(vis_image, (bbox[0], bbox[1]), (bbox[0] + corner_size, bbox[1]), (0, 255, 0), 5)
+            cv2.line(vis_image, (bbox[0], bbox[1]), (bbox[0], bbox[1] + corner_size), (0, 255, 0), 5)
+            # Top-right
+            cv2.line(vis_image, (bbox[2], bbox[1]), (bbox[2] - corner_size, bbox[1]), (0, 255, 0), 5)
+            cv2.line(vis_image, (bbox[2], bbox[1]), (bbox[2], bbox[1] + corner_size), (0, 255, 0), 5)
+            # Bottom-left
+            cv2.line(vis_image, (bbox[0], bbox[3]), (bbox[0] + corner_size, bbox[3]), (0, 255, 0), 5)
+            cv2.line(vis_image, (bbox[0], bbox[3]), (bbox[0], bbox[3] - corner_size), (0, 255, 0), 5)
+            # Bottom-right
+            cv2.line(vis_image, (bbox[2], bbox[3]), (bbox[2] - corner_size, bbox[3]), (0, 255, 0), 5)
+            cv2.line(vis_image, (bbox[2], bbox[3]), (bbox[2], bbox[3] - corner_size), (0, 255, 0), 5)
         
         # Add title bar
         cv2.putText(
