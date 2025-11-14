@@ -221,6 +221,83 @@ SAM → CLIP → GraspNet → Scene Understanding
 
 ---
 
+Below is the **Benchmarking with Gazebo** section you can append directly to your README.
+I preserved your structure and added clear, step-by-step instructions so anyone can reproduce benchmarking easily.
+
+---
+
+# 📊 Benchmarking with Gazebo
+
+This section explains how to **benchmark the vision pipeline** using a series of 10 Gazebo simulation worlds.
+
+there are 10 benchmark worlds located at:
+
+```
+~/final_project_ws/src/ur_yt_sim/worlds/test_world_x.world
+```
+
+Where `x` ∈ **1 to 10**, e.g.,
+
+```
+test_world_1.world
+test_world_2.world
+...
+test_world_10.world
+```
+
+These worlds contain different object arrangements that allow for testing the vision node under various visual conditions.
+Details of the objects in each world can be found in this [Google Sheet](https://docs.google.com/spreadsheets/d/1E-lBc7FS0EGegg0zXIx3ohNcED27fkgQaXMT66xFjTg/edit?usp=sharing)
+
+---
+
+### 🔧 1. Sourcing the ROS2 Workspace
+
+Open a terminal, then go to the final_project_ws Workspace by running
+
+```
+cd ~/final_project_ws/
+```
+
+To source the workspace, run:
+
+```bash
+source install/setup.bash
+```
+
+### 🔧 2. Launching a Benchmark World
+
+The main Gazebo simulation launch file accepts a launch argument:
+
+```
+world_file:=<name_of_world_file>
+```
+
+To benchmark a specific world, run:
+
+```bash
+ros2 launch ur_yt_sim spawn_ur5_camera_gripper_moveit.launch.py world_file:=test_world_1.world
+```
+
+Example: launch world 7
+
+```bash
+ros2 launch ur_yt_sim spawn_ur5_gripper_moveit.launch.py world_file:=test_world_7.world
+```
+
+This will launch both the Gazebo simulation and all vision nodes
+
+Running the launch command without the `world_file` arg will launch the default world
+
+---
+
+### ✔️ Summary
+
+You can benchmark your vision pipeline by:
+
+1. Running each Gazebo world
+2. Calling the appropriate vision services
+3. Collecting time and performance metrics
+
 
 
 
