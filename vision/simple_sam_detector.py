@@ -62,6 +62,7 @@ class SimpleSAMDetector(Node):
         self.frame_captured = False
         self.latest_depth = None  # For distance estimation if available
         self.latest_detections = []
+        self.previous_detections = []  # For IoU tracking
         self.frame_counter = 0
         
         # QoS profile for image subscription
@@ -125,6 +126,12 @@ class SimpleSAMDetector(Node):
 
         # Record a start time for status messages
         self._node_start_time = self.get_clock().now()
+        
+        # Service client for CLIP filtered classification
+        self.clip_filter_client = self.create_client(
+            Trigger,
+            '/vision/classify_bbox_filtered'
+        )
         
         # OpenCV window setup
         self.window_name = "SAM Object Detection - /camera/image_raw"
@@ -216,8 +223,11 @@ class SimpleSAMDetector(Node):
             self.get_logger().info(f"Frame shape: {frame_to_use.shape}")
             self.get_logger().info("=" * 80)
             
-            # Run detection on captured frame
+            # Run detection on captured frame (with IoU tracking from previous frame)
             self.latest_detections = self._detect_objects(frame_to_use)
+            
+            # Store current detections as previous for next frame IoU calculation
+            self.previous_detections = self.latest_detections.copy()
             
             # Build JSON response in the requested schema
             detection_data = self._build_detection_schema()
@@ -287,12 +297,60 @@ class SimpleSAMDetector(Node):
                 self.get_logger().warn("No image received yet")
                 return response
             
-            self.get_logger().info("Running SAM detection and returning results...")
+            self.get_logger().info("=" * 80)
+            self.get_logger().info("Running SAM detection and CLIP classification...")
+            self.get_logger().info("=" * 80)
             
-            # Run detection on captured frame
+            # Step 1: Run SAM detection on captured frame
             self.latest_detections = self._detect_objects(frame_to_use)
+            self.get_logger().info(f"SAM detected {len(self.latest_detections)} objects")
             
-            # Build parallel arrays for response
+            # Store current detections as previous for next frame IoU calculation
+            self.previous_detections = self.latest_detections.copy()
+            
+            # Step 2: Publish detections to trigger CLIP auto-classification
+            self._publish_detections_ros()
+            self.get_logger().info("Published detections to /vision/sam_detections (CLIP will auto-classify)")
+            
+            # Step 3: Wait briefly for CLIP to process (give it time to classify)
+            import time
+            time.sleep(0.5)  # 500ms delay for CLIP processing
+            
+            # Step 4: Call classify_bbox_filtered service to get filtered classifications
+            clip_classifications = {}
+            if self.clip_filter_client.wait_for_service(timeout_sec=2.0):
+                self.get_logger().info("Calling /vision/classify_bbox_filtered service...")
+                clip_request = Trigger.Request()
+                
+                try:
+                    future = self.clip_filter_client.call_async(clip_request)
+                    rclpy.spin_until_future_complete(self, future, timeout_sec=3.0)
+                    
+                    if future.result() is not None:
+                        clip_response = future.result()
+                        if clip_response.success:
+                            # Parse JSON response
+                            clip_data = json.loads(clip_response.message)
+                            self.get_logger().info(f"CLIP classified {clip_data.get('filtered_regions', 0)} objects with confidence > 0.5")
+                            
+                            # Map region_id to label for easy lookup
+                            for region in clip_data.get('regions', []):
+                                region_id = region.get('region_id')
+                                clip_classifications[region_id] = {
+                                    'label': region.get('label'),
+                                    'confidence': region.get('confidence'),
+                                    'bbox': region.get('bbox')
+                                }
+                        else:
+                            self.get_logger().warn(f"CLIP classification failed: {clip_response.message}")
+                    else:
+                        self.get_logger().warn("CLIP service call failed (no response)")
+                except Exception as e:
+                    self.get_logger().warn(f"CLIP service call exception: {e}")
+            else:
+                self.get_logger().warn("CLIP classify_bbox_filtered service not available (timeout)")
+            
+            # Step 5: Build parallel arrays for response (merge SAM + CLIP results)
             object_ids = []
             bbox_x1 = []
             bbox_y1 = []
@@ -301,14 +359,25 @@ class SimpleSAMDetector(Node):
             confidences = []
             distances_cm = []
             
-            for det in self.latest_detections:
-                object_ids.append(det['id'])
+            for idx, det in enumerate(self.latest_detections):
+                # Check if we have CLIP classification for this region
+                clip_info = clip_classifications.get(idx)
+                
+                if clip_info:
+                    # Use CLIP label and confidence
+                    object_ids.append(f"{clip_info['label']}_{idx}")
+                    confidences.append(float(clip_info['confidence']))
+                    self.get_logger().info(f"  Region {idx}: {clip_info['label']} (CLIP confidence: {clip_info['confidence']:.2f})")
+                else:
+                    # Use SAM generic label
+                    object_ids.append(det['id'])
+                    confidences.append(float(det['confidence']))
+                
                 bbox = det['bbox']
                 bbox_x1.append(bbox[0])
                 bbox_y1.append(bbox[1])
                 bbox_x2.append(bbox[2])
                 bbox_y2.append(bbox[3])
-                confidences.append(float(det['confidence']))
                 
                 # Add distance if available
                 distance = det.get('distance_cm')
@@ -326,15 +395,18 @@ class SimpleSAMDetector(Node):
             response.distances_cm = distances_cm
             response.error_message = ""
             
-            self.get_logger().info(f"Detection complete: {len(self.latest_detections)} objects found")
+            self.get_logger().info("=" * 80)
+            self.get_logger().info(f"Detection + Classification complete: {len(self.latest_detections)} objects")
+            self.get_logger().info("=" * 80)
             
-            # Print bounding boxes
-            self.get_logger().info("Bounding Boxes:")
+            # Print bounding boxes with labels
+            self.get_logger().info("Results (SAM + CLIP):")
             for i in range(len(object_ids)):
                 self.get_logger().info(
                     f"  {object_ids[i]}: bbox=[{bbox_x1[i]}, {bbox_y1[i]}, {bbox_x2[i]}, {bbox_y2[i]}], "
                     f"conf={confidences[i]:.2f}, dist={distances_cm[i]:.1f}cm"
                 )
+            self.get_logger().info("=" * 80)
             
         except Exception as e:
             response.success = False
@@ -531,6 +603,18 @@ class SimpleSAMDetector(Node):
                 except Exception as e:
                     pass  # Distance estimation failed, leave as None
             
+            # Calculate IoU with previous frame detections (for AP-style metric)
+            iou_score = 0.0
+            matched_prev_id = None
+            if self.previous_detections:
+                best_iou = 0.0
+                for prev_det in self.previous_detections:
+                    iou = self._calculate_iou([x, y, x + w_box, y + h_box], prev_det['bbox'])
+                    if iou > best_iou:
+                        best_iou = iou
+                        matched_prev_id = prev_det['id']
+                iou_score = best_iou
+            
             detection = {
                 "id": f"obj_{i}",
                 "class_name": "object",  # Generic class, can be enhanced with actual classification
@@ -540,12 +624,54 @@ class SimpleSAMDetector(Node):
                 "area": int(area),
                 "distance_cm": distance_cm,
                 "mask": mask,
-                "contour": contour
+                "contour": contour,
+                "iou_score": float(iou_score),  # IoU with previous frame
+                "matched_prev_id": matched_prev_id,
+                "is_stable": iou_score >= 0.5  # COCO AP threshold (IoU >= 0.5)
             }
             
             detections.append(detection)
         
         return detections
+    
+    def _calculate_iou(self, bbox1: List[int], bbox2: List[int]) -> float:
+        """
+        Calculate Intersection over Union (IoU) between two bounding boxes
+        
+        Args:
+            bbox1: [x1, y1, x2, y2]
+            bbox2: [x1, y1, x2, y2]
+            
+        Returns:
+            IoU score (0.0 to 1.0)
+        """
+        x1_1, y1_1, x2_1, y2_1 = bbox1
+        x1_2, y1_2, x2_2, y2_2 = bbox2
+        
+        # Calculate intersection rectangle
+        x1_i = max(x1_1, x1_2)
+        y1_i = max(y1_1, y1_2)
+        x2_i = min(x2_1, x2_2)
+        y2_i = min(y2_1, y2_2)
+        
+        # Check if there is an intersection
+        if x2_i < x1_i or y2_i < y1_i:
+            return 0.0
+        
+        # Calculate intersection area
+        intersection_area = (x2_i - x1_i) * (y2_i - y1_i)
+        
+        # Calculate union area
+        bbox1_area = (x2_1 - x1_1) * (y2_1 - y1_1)
+        bbox2_area = (x2_2 - x1_2) * (y2_2 - y1_2)
+        union_area = bbox1_area + bbox2_area - intersection_area
+        
+        # Calculate IoU
+        if union_area == 0:
+            return 0.0
+        
+        iou = intersection_area / union_area
+        return float(iou)
     
     def _build_detection_schema(self) -> Dict:
         """
@@ -561,6 +687,8 @@ class SimpleSAMDetector(Node):
         detections_list = []
         total_distance = 0.0
         distance_count = 0
+        total_iou = 0.0
+        stable_detections = 0  # COCO AP style: IoU >= 0.5
         
         for det in self.latest_detections:
             detection_obj = {
@@ -575,10 +703,25 @@ class SimpleSAMDetector(Node):
                 total_distance += det["distance_cm"]
                 distance_count += 1
             
+            # Add IoU metrics (COCO AP style)
+            detection_obj["iou_with_previous"] = round(det.get("iou_score", 0.0), 3)
+            detection_obj["is_stable_detection"] = det.get("is_stable", False)
+            
+            if det.get("iou_score", 0.0) > 0:
+                total_iou += det["iou_score"]
+            
+            if det.get("is_stable", False):
+                stable_detections += 1
+            
             detections_list.append(detection_obj)
         
         # Calculate average distance
         average_distance = round(total_distance / distance_count, 1) if distance_count > 0 else None
+        
+        # Calculate COCO AP style metrics
+        num_detections = len(self.latest_detections)
+        average_iou = round(total_iou / num_detections, 3) if num_detections > 0 else 0.0
+        stability_rate = round(stable_detections / num_detections, 3) if num_detections > 0 else 0.0
         
         # Build schema
         schema = {
@@ -592,6 +735,20 @@ class SimpleSAMDetector(Node):
             "summary": {
                 "total_detections": len(self.latest_detections),
                 "timestamp": datetime.utcnow().isoformat() + "Z"
+            },
+            "metrics": {
+                "coco_ap_style": {
+                    "description": "IoU-based detection stability (frame-to-frame tracking)",
+                    "average_iou": average_iou,
+                    "stable_detections_count": stable_detections,
+                    "stability_rate": stability_rate,
+                    "iou_threshold": 0.5,
+                    "note": "Stable detection = IoU >= 0.5 with previous frame (similar to COCO AP@0.5)"
+                },
+                "circularity_confidence": {
+                    "description": "Shape-based confidence (geometric quality)",
+                    "average_confidence": round(sum([d["confidence"] for d in detections_list]) / num_detections, 3) if num_detections > 0 else 0.0
+                }
             }
         }
         
@@ -695,10 +852,11 @@ class SimpleSAMDetector(Node):
         vis_image = frame_to_display.copy()
         
         # Draw detections
-        for det in self.latest_detections:
+        for idx, det in enumerate(self.latest_detections):
             bbox = det['bbox']
             confidence = det['confidence']
             distance = det.get('distance_cm')
+            obj_no = idx  # Object number
             
             # Draw bounding box
             cv2.rectangle(
@@ -719,11 +877,11 @@ class SimpleSAMDetector(Node):
                 vis_image
             )
             
-            # Draw label with distance
+            # Draw label with object number and distance
             if distance is not None:
-                label = f"{det.get('class_name', det['id'])}: {confidence:.2f} ({distance:.1f}cm)"
+                label = f"#{obj_no} {det.get('class_name', det['id'])}: {confidence:.2f} ({distance:.1f}cm)"
             else:
-                label = f"{det.get('class_name', det['id'])}: {confidence:.2f}"
+                label = f"#{obj_no} {det.get('class_name', det['id'])}: {confidence:.2f}"
             
             label_size, _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
             

@@ -329,7 +329,35 @@ class SceneUnderstandingNode(Node):
             if self.latest_rgb is not None:
                 self._visualize_scene(self.latest_rgb, scene)
             
-            # Create success response
+            # Build relations grouped by object for response
+            objects_with_relations = {}
+            for obj in scene.objects:
+                obj_id = obj.object_id
+                obj_relations = []
+                
+                # Find all relations where this object is the subject
+                for rel in obj.relations:
+                    relation_str = f"{rel.relation.replace('_', ' ')} {rel.object_label} (conf: {rel.confidence:.2f})"
+                    obj_relations.append({
+                        "relation": rel.relation,
+                        "target_object": rel.object_label,
+                        "confidence": round(rel.confidence, 2),
+                        "distance_2d": round(rel.distance_2d, 1),
+                        "description": relation_str
+                    })
+                
+                objects_with_relations[obj_id] = {
+                    "label": obj.class_label,
+                    "confidence": round(obj.classification_conf, 2),
+                    "bbox": obj.bbox,
+                    "center": obj.center,
+                    "distance_cm": round(obj.distance_cm, 1) if obj.distance_cm > 0 else None,
+                    "has_grasp": obj.has_grasp,
+                    "grasp_quality": round(obj.grasp_quality, 2) if obj.has_grasp else None,
+                    "relations": obj_relations
+                }
+            
+            # Create success response with objects and their relations
             response.success = True
             response.message = json.dumps({
                 "success": True,
@@ -338,6 +366,7 @@ class SceneUnderstandingNode(Node):
                 "total_relations": len(scene.all_relations),
                 "graspable_objects": scene.graspable_objects,
                 "scene_description": scene.scene_description,
+                "objects": objects_with_relations,
                 "timestamp": datetime.utcnow().isoformat() + "Z"
             }, indent=2)
             
@@ -347,6 +376,11 @@ class SceneUnderstandingNode(Node):
             self.get_logger().info(f"  Relations: {len(scene.all_relations)}")
             self.get_logger().info(f"  Graspable: {scene.graspable_objects}")
             self.get_logger().info(f"  Description: {scene.scene_description}")
+            self.get_logger().info("=" * 60)
+            self.get_logger().info("Objects with Relations:")
+            for obj_id, obj_data in objects_with_relations.items():
+                relations_str = ", ".join([r["description"] for r in obj_data["relations"]]) if obj_data["relations"] else "No relations"
+                self.get_logger().info(f"  {obj_id} ({obj_data['label']}): {relations_str}")
             self.get_logger().info("=" * 60)
             
         except Exception as e:

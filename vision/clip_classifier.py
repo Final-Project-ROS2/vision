@@ -20,12 +20,24 @@ Services:
        ros2 service call /vision/run_pipeline std_srvs/srv/Trigger
     
     4. /vision/find_object
-       Find bounding box by label name (runs CLIP classification automatically on SAM regions)
+       Find bounding box by label name
        ros2 service call /vision/find_object custom_interfaces/srv/FindObject "{label: 'piston_rod'}"
+    
+    5. /vision/classify_bbox_filtered
+       Get filtered classifications (confidence > 0.5) from latest SAM detections
+       ros2 service call /vision/classify_bbox_filtered std_srvs/srv/Trigger
+       Note: Must call /vision/run_pipeline first to trigger SAM detection
 
 Setup:
     Terminal 1: ros2 run vision simple_sam_detector
     Terminal 2: ros2 run vision clip_classifier
+    
+Workflow:
+    # Step 1: Run SAM detection (auto-classifies with CLIP via subscription)
+    ros2 service call /vision/run_pipeline std_srvs/srv/Trigger
+    
+    # Step 2: Get filtered results (only objects with confidence > 0.5)
+    ros2 service call /vision/classify_bbox_filtered std_srvs/srv/Trigger
 """
 
 import rclpy
@@ -99,7 +111,12 @@ class CLIPClassifier(Node):
             "gear",
             "monkey_wrench",
             "piston_rod",
-            "washer"
+            "washer",
+            "cross_joint_part",
+            "white_ball",
+            "door_handle",
+            "red_ball",
+            "gasket_part"
         ]
         
         # CV Bridge for ROS<->OpenCV conversion
@@ -170,6 +187,13 @@ class CLIPClassifier(Node):
             except ImportError:
                 self.get_logger().warn("FindObject service not available. Add to custom_interfaces.")
         
+        # Classify all SAM bboxes with confidence filter service
+        self.classify_filtered_service = self.create_service(
+            Trigger,
+            '/vision/classify_bbox_filtered',
+            self.classify_bbox_filtered_callback
+        )
+        
         # Subscribe to live SAM detections for auto-classification
         if SAM_MSGS_AVAILABLE:
             self.sam_sub = self.create_subscription(
@@ -204,6 +228,7 @@ class CLIPClassifier(Node):
         self.get_logger().info(f"Device: {self.device}")
         self.get_logger().info(f"Service: /vision/classify_all")
         self.get_logger().info(f"Service: /vision/classify_bb")
+        self.get_logger().info(f"Service: /vision/classify_bbox_filtered")
         self.get_logger().info(f"Service: /vision/find_object")
         self.get_logger().info(f"Subscriber: /vision/sam_detections (auto-classify on SAM publish)")
         self.get_logger().info(f"OpenCV Window: '{self.window_name}'")
@@ -421,6 +446,99 @@ class CLIPClassifier(Node):
         
         return response
 
+    def classify_bbox_filtered_callback(self, request, response):
+        """
+        Service callback for /vision/classify_bbox_filtered - filter classified regions by confidence > 0.5
+        Uses: std_srvs/srv/Trigger
+        Returns: JSON with filtered classifications from latest SAM detections
+        
+        NOTE: This service returns classifications from the latest SAM detection.
+        Make sure to call 'ros2 service call /vision/run_pipeline std_srvs/srv/Trigger' first
+        to trigger SAM detection and automatic CLIP classification.
+        """
+        try:
+            if self.captured_frame is None:
+                response.success = False
+                response.message = json.dumps({
+                    "error": "No frame captured yet from /camera/image_raw",
+                    "timestamp": datetime.utcnow().isoformat() + "Z"
+                }, indent=2)
+                self.get_logger().warn("No frame captured yet")
+                return response
+            
+            if not CLIP_AVAILABLE or self.model is None:
+                response.success = False
+                response.message = json.dumps({
+                    "error": "CLIP model not available",
+                    "timestamp": datetime.utcnow().isoformat() + "Z"
+                }, indent=2)
+                self.get_logger().error("CLIP model not available")
+                return response
+            
+            # Check if we have classified regions from SAM subscription
+            if not self.latest_region_classifications:
+                response.success = False
+                response.message = json.dumps({
+                    "error": "No classified regions available. Call '/vision/run_pipeline' first to trigger SAM detection.",
+                    "hint": "ros2 service call /vision/run_pipeline std_srvs/srv/Trigger",
+                    "timestamp": datetime.utcnow().isoformat() + "Z"
+                }, indent=2)
+                self.get_logger().warn("No classified regions. Run SAM pipeline first.")
+                return response
+            
+            self.get_logger().info(f"Filtering {len(self.latest_region_classifications)} classified regions by confidence > 0.5")
+            
+            # Filter regions by confidence >= 0.5
+            filtered_regions = []
+            for region in self.latest_region_classifications:
+                top_pred = region['top_prediction']
+                if top_pred['confidence'] >= 0.5:
+                    filtered_regions.append({
+                        'region_id': region['region_id'],
+                        'bbox': region['bbox'],
+                        'label': top_pred['label'],
+                        'confidence': top_pred['confidence']
+                    })
+            
+            # Build response
+            result = {
+                "pipeline": "sam_clip_filtered",
+                "total_sam_regions": len(self.latest_region_classifications),
+                "filtered_regions": len(filtered_regions),
+                "regions": filtered_regions,
+                "metadata": {
+                    "timestamp": datetime.utcnow().isoformat() + "Z",
+                    "confidence_threshold": 0.5
+                }
+            }
+            
+            response.success = True
+            response.message = json.dumps(result, indent=2)
+            
+            self.get_logger().info(
+                f"Filtered classification complete: {len(filtered_regions)}/{len(self.latest_region_classifications)} "
+                f"regions passed confidence threshold"
+            )
+            
+            # Log each filtered region
+            for region in filtered_regions:
+                self.get_logger().info(
+                    f"Region #{region['region_id']}: {region['label']} "
+                    f"(confidence: {region['confidence']:.2f})"
+                )
+            
+        except Exception as e:
+            response.success = False
+            response.message = json.dumps({
+                "error": str(e),
+                "timestamp": datetime.utcnow().isoformat() + "Z"
+            }, indent=2)
+            self.get_logger().error(f"Filtered classification error: {e}")
+            import traceback
+            self.get_logger().error(traceback.format_exc())
+        
+        return response
+
     def sam_detections_callback(self, msg: 'SAMDetections'):
         """Handle incoming SAM detections and automatically classify each region"""
         try:
@@ -476,7 +594,6 @@ class CLIPClassifier(Node):
     def find_object_callback(self, request, response):
         """
         Service callback for /vision/find_object - find bounding box by label
-        Automatically runs CLIP classification on available SAM detections
         
         Custom Interface Definition (add to custom_interfaces/srv/FindObject.srv):
         # Request
@@ -498,79 +615,14 @@ class CLIPClassifier(Node):
                 response.confidence = 0.0
                 return response
             
-            # Check if we have a captured frame
-            if self.captured_frame is None:
-                response.success = False
-                response.message = "No frame captured yet from /camera/image_raw"
-                response.bbox = []
-                response.confidence = 0.0
-                self.get_logger().warn("No captured frame available")
-                return response
-            
-            # Check if CLIP is available
-            if not CLIP_AVAILABLE or self.model is None:
-                response.success = False
-                response.message = "CLIP model not available"
-                response.bbox = []
-                response.confidence = 0.0
-                self.get_logger().error("CLIP model not available")
-                return response
-            
-            # If no classified regions, try to get SAM detections and classify them
+            # Check if we have classified regions
             if not self.latest_region_classifications:
-                self.get_logger().info("No classified regions available. Checking for SAM detections...")
-                
-                # Try calling SAM detection service to get fresh detections
-                try:
-                    sam_client = self.create_client(Trigger, '/vision/sam_detect')
-                    
-                    if not sam_client.wait_for_service(timeout_sec=2.0):
-                        response.success = False
-                        response.message = "SAM detection service not available. Please run simple_sam_detector first."
-                        response.bbox = []
-                        response.confidence = 0.0
-                        self.latest_found_object = None
-                        self.get_logger().warn("SAM service not available")
-                        return response
-                    
-                    # Call SAM service
-                    self.get_logger().info("Calling SAM detection service...")
-                    sam_request = Trigger.Request()
-                    future = sam_client.call_async(sam_request)
-                    rclpy.spin_until_future_complete(self, future, timeout_sec=5.0)
-                    
-                    if not future.done() or not future.result().success:
-                        response.success = False
-                        response.message = "SAM detection failed. Please check simple_sam_detector."
-                        response.bbox = []
-                        response.confidence = 0.0
-                        self.latest_found_object = None
-                        return response
-                    
-                    # Wait for SAM detections message to arrive
-                    self.get_logger().info("Waiting for SAM detections message...")
-                    time.sleep(0.5)
-                    
-                    # Check if we received detections via subscriber
-                    if not self.latest_region_classifications:
-                        response.success = False
-                        response.message = "No objects detected by SAM or classification failed."
-                        response.bbox = []
-                        response.confidence = 0.0
-                        self.latest_found_object = None
-                        return response
-                    
-                except Exception as e:
-                    self.get_logger().error(f"Error calling SAM service: {e}")
-                    response.success = False
-                    response.message = f"SAM service error: {str(e)}"
-                    response.bbox = []
-                    response.confidence = 0.0
-                    self.latest_found_object = None
-                    return response
-            
-            # Now search for the target label in classified regions
-            self.get_logger().info(f"Searching for '{target_label}' in {len(self.latest_region_classifications)} classified regions...")
+                response.success = False
+                response.message = f"No classified regions available. Run SAM detection first or call /vision/classify_bb"
+                response.bbox = []
+                response.confidence = 0.0
+                self.get_logger().warn(f"No classified regions for label: {target_label}")
+                return response
             
             # Find all matching regions
             matching_regions = []

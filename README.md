@@ -129,7 +129,7 @@ Detects objects using SAM (Segment Anything Model).
 | Name                       | Description                                                                       | Example                                                                        |
 | -------------------------- | --------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
 | `/vision/run_pipeline`     | Trigger full SAM pipeline and continuously publish to `/vision/sam_detections`    | `ros2 service call /vision/run_pipeline std_srvs/srv/Trigger`                  |
-| `/vision/detect_objects`   | Detect objects in one frame and return bounding boxes, confidences, and distances | `ros2 service call /vision/detect_objects custom_interfaces/srv/DetectObjects` |
+| `/vision/detect_objects`   | Detect objects in one frame and return bounding boxes, confidences, and distances | `ros2 service call /vision/detect_objects std_srvs/srv/Trigger` |
 | `/vision/show_depth_image` | Display depth camera visualization                                                | `ros2 service call /vision/show_depth_image std_srvs/srv/Trigger`              |
 
 **Setup**
@@ -169,7 +169,7 @@ Estimates grasp poses for detected objects using GraspNet.
 
 | Name                      | Description                                                                   | Example                                                                                                                  |
 | ------------------------- | ----------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
-| `/vision/detect_grasp`    | Compute grasp poses for all detected objects                                  | `ros2 service call /vision/detect_grasp custom_interfaces/srv/DetectGrasps`                                              |
+| `/vision/detect_grasp`    | Compute grasp poses for all detected objects                                  | `ros2 service call /vision/detect_grasp std_srvs/srv/Trigger`                                              |
 | `/vision/detect_grasp_bb` | Compute grasp pose within a specific bounding box                             | `ros2 service call /vision/detect_grasp_bb custom_interfaces/srv/DetectGraspBBox "{x1: 100, y1: 100, x2: 200, y2: 300}"` |
 | `/vision/run_pipeline`    | Subscribes to `/vision/sam_detections` and automatically runs grasp detection | `ros2 service call /vision/run_pipeline std_srvs/srv/Trigger`                                                            |
 
@@ -191,7 +191,7 @@ Analyzes spatial relationships and context between detected objects.
 
 | Name                       | Description                                                               | Example                                                                            |
 | -------------------------- | ------------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
-| `/vision/understand_scene` | Get scene-level understanding (calls `/vision/detect_objects` internally) | `ros2 service call /vision/understand_scene custom_interfaces/srv/UnderstandScene` |
+| `/vision/understand_scene` | Get scene-level understanding (calls `/vision/detect_objects` internally) | `ros2 service call /vision/understand_scene std_srvs/srv/Trigger` |
 | `/vision/run_pipeline`     | Subscribes to `/vision/sam_detections` and runs full scene analysis       | `ros2 service call /vision/run_pipeline std_srvs/srv/Trigger`                      |
 
 **Publishes**
