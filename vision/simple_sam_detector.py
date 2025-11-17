@@ -383,6 +383,35 @@ class SimpleSAMDetector(Node):
                 distance = det.get('distance_cm')
                 distances_cm.append(float(distance) if distance is not None else -1.0)
             
+            # Build IoU metrics arrays
+            iou_scores = []
+            is_stable_array = []
+            total_iou = 0.0
+            stable_count = 0
+            
+            self.get_logger().info(f"Building IoU arrays from {len(self.latest_detections)} detections")
+            
+            for idx, det in enumerate(self.latest_detections):
+                iou = det.get('iou_score', 0.0)
+                is_stable = det.get('is_stable', False)
+                
+                self.get_logger().info(f"  Detection {idx}: iou_score={iou}, is_stable={is_stable}")
+                
+                iou_scores.append(float(iou))
+                is_stable_array.append(bool(is_stable))
+                
+                if iou > 0:
+                    total_iou += iou
+                if is_stable:
+                    stable_count += 1
+            
+            self.get_logger().info(f"IoU arrays built: {len(iou_scores)} scores, {stable_count} stable")
+            
+            # Calculate aggregate metrics
+            num_dets = len(self.latest_detections)
+            average_iou = total_iou / num_dets if num_dets > 0 else 0.0
+            stability_rate = stable_count / num_dets if num_dets > 0 else 0.0
+            
             # Build response
             response.success = True
             response.total_detections = len(self.latest_detections)
@@ -393,6 +422,11 @@ class SimpleSAMDetector(Node):
             response.bbox_y2 = bbox_y2
             response.confidences = confidences
             response.distances_cm = distances_cm
+            response.iou_scores = iou_scores
+            response.is_stable = is_stable_array
+            response.average_iou = float(average_iou)
+            response.stable_count = int(stable_count)
+            response.stability_rate = float(stability_rate)
             response.error_message = ""
             
             self.get_logger().info("=" * 80)
@@ -418,6 +452,11 @@ class SimpleSAMDetector(Node):
             response.bbox_y2 = []
             response.confidences = []
             response.distances_cm = []
+            response.iou_scores = []
+            response.is_stable = []
+            response.average_iou = 0.0
+            response.stable_count = 0
+            response.stability_rate = 0.0
             response.error_message = str(e)
             self.get_logger().error(f"Detection error: {e}")
             import traceback
@@ -588,6 +627,10 @@ class SimpleSAMDetector(Node):
             perimeter = cv2.arcLength(contour, True)
             circularity = 4 * np.pi * area / (perimeter * perimeter) if perimeter > 0 else 0
             confidence = min(0.95, 0.60 + circularity * 0.35)
+            
+            # Filter by confidence threshold (only keep detections > 0.4)
+            if confidence <= 0.4:
+                continue
             
             # Estimate distance from depth image (if available)
             distance_cm = None
@@ -809,6 +852,11 @@ class SimpleSAMDetector(Node):
                 
                 # Convert mask to ROS Image message
                 sam_det.mask = self.bridge.cv2_to_imgmsg(det['mask'], encoding='mono8')
+                
+                # IoU tracking fields (COCO AP-style metrics)
+                sam_det.iou_score = float(det.get('iou_score', 0.0))
+                sam_det.matched_prev_id = str(det.get('matched_prev_id', ''))
+                sam_det.is_stable_detection = bool(det.get('is_stable', False))
                 
                 msg.detections.append(sam_det)
             
