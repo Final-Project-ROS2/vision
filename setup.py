@@ -62,6 +62,7 @@ setup(
             'scene_understanding = vision.scene_understanding:main',
             'pixel_to_real_service = vision.pixel_to_real:main',
             'unified_pipeline = vision.unified_pipeline:main',
+            'find_object_service = vision.find_object_service_node:main',
             # 'show_rgb_image = vision.show_rgb_image_node:main',
             # 'show_depth_image = vision.show_depth_image_node:main',
             # 'camera_service = vision.camera_service_node:main',
