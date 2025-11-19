@@ -117,40 +117,41 @@ class CLIPClassifier(Node):
             # "door_handle",
             # "red_ball",
             # "gasket_part",
+
             "beer_can",
             "bowl",
             "cinder_block",
             "coke_can",
             "roomba",
-            "plastic_cup",
-            "hammer",
-            "robotic_arm",
-            "white_robotic_hand",
-            "drone",
-            "t_brace_part",
-            "brown_box",
-            "u_joint_part",
-            "tube",
-            "steak_set",
-            "mug",
-            "tool_belt",
-            "magnifying_glass",
-            "ramekin",
-            "cracker_box",
-            "basket",
-            "square_plate",
-            "birthday_cake",
-            "plum",
-            "meat_can",
-            "lemon",
-            "salad_on_plate",
-            "mobile_robot",
-            "ink_cartridge",
-            "toilet_paper",
-            "bagel_with_cheese",
-            "shoe",
-            "boardgame",
-            "piston_rod_part"
+            # "plastic_cup",
+            # "hammer",
+            # "robotic_arm",
+            # "white_robotic_hand",
+            # "drone",
+            # "t_brace_part",
+            # "brown_box",
+            # "u_joint_part",
+            # "tube",
+            # "steak_set",
+            # "mug",
+            # "tool_belt",
+            # "magnifying_glass",
+            # "ramekin",
+            # "cracker_box",
+            # "basket",
+            # "square_plate",
+            # "birthday_cake",
+            # "plum",
+            # "meat_can",
+            # "lemon",
+            # "salad_on_plate",
+            # "mobile_robot",
+            # "ink_cartridge",
+            # "toilet_paper",
+            # "bagel_with_cheese",
+            # "shoe",
+            # "boardgame",
+            # "piston_rod_part"
         ]
         
         # CV Bridge for ROS<->OpenCV conversion
@@ -627,7 +628,14 @@ class CLIPClassifier(Node):
     
     def find_object_callback(self, request, response):
         """
-        Service callback for /vision/find_object - find bounding box by label
+        Service callback for /vision/find_object - find bounding box by label using CLIP embeddings
+        
+        This service:
+        1. Takes a label name as input (can be ANY text, not limited to candidate_labels)
+        2. Gets text embedding for the label using CLIP
+        3. Gets image embeddings for all SAM bounding boxes
+        4. Computes cosine similarity between label and each bbox
+        5. Returns the bounding box with highest similarity score
         
         Custom Interface Definition (add to custom_interfaces/srv/FindObject.srv):
         # Request
@@ -649,48 +657,187 @@ class CLIPClassifier(Node):
                 response.confidence = 0.0
                 return response
             
-            # Check if we have classified regions
-            if not self.latest_region_classifications:
+            if self.captured_frame is None:
                 response.success = False
-                response.message = f"No classified regions available. Run SAM detection first or call /vision/classify_bb"
+                response.message = "No frame captured yet from /camera/image_raw"
                 response.bbox = []
                 response.confidence = 0.0
-                self.get_logger().warn(f"No classified regions for label: {target_label}")
+                self.get_logger().warn("No captured frame available")
                 return response
             
-            # Find all matching regions
-            matching_regions = []
-            for region in self.latest_region_classifications:
-                top_pred = region['top_prediction']
-                if top_pred['label'] == target_label:
-                    matching_regions.append({
-                        'bbox': region['bbox'],
-                        'confidence': top_pred['confidence'],
-                        'region_id': region['region_id']
-                    })
-            
-            # Check if any matches found
-            if not matching_regions:
+            if not CLIP_AVAILABLE or self.model is None:
                 response.success = False
-                response.message = f"Label '{target_label}' not found in classified regions"
+                response.message = "CLIP model not available"
+                response.bbox = []
+                response.confidence = 0.0
+                self.get_logger().error("CLIP model not available")
+                return response
+            
+            # Check if we have classified regions from SAM, if not, get detections
+            if not self.latest_region_classifications:
+                self.get_logger().info("No SAM detections available. Calling /vision/detect_objects automatically...")
+                
+                # Create a client to call the detect_objects service
+                try:
+                    from custom_interfaces.srv import DetectObjects
+                except ImportError:
+                    response.success = False
+                    response.message = "DetectObjects service interface not available"
+                    response.bbox = []
+                    response.confidence = 0.0
+                    self.get_logger().error("DetectObjects interface not found")
+                    return response
+                
+                detect_client = self.create_client(DetectObjects, '/vision/detect_objects')
+                
+                # Wait for service to be available (timeout 5 seconds)
+                if not detect_client.wait_for_service(timeout_sec=5.0):
+                    response.success = False
+                    response.message = "Detection service '/vision/detect_objects' not available"
+                    response.bbox = []
+                    response.confidence = 0.0
+                    self.get_logger().error("Detection service not available")
+                    return response
+                
+                # Call the detection service
+                detect_request = DetectObjects.Request()
+                detect_future = detect_client.call_async(detect_request)
+                
+                # Wait for the detection to complete (timeout 100 seconds)
+                timeout = 100.0
+                start_time = time.time()
+                while not detect_future.done():
+                    if time.time() - start_time > timeout:
+                        response.success = False
+                        response.message = "Timeout waiting for object detection to complete"
+                        response.bbox = []
+                        response.confidence = 0.0
+                        self.get_logger().error("Detection timeout")
+                        return response
+                    rclpy.spin_once(self, timeout_sec=0.1)
+                
+                # Get detection result
+                detect_response = detect_future.result()
+                if not detect_response.success:
+                    response.success = False
+                    response.message = f"Object detection failed: {detect_response.error_message}"
+                    response.bbox = []
+                    response.confidence = 0.0
+                    self.get_logger().error(f"Detection failed: {detect_response.error_message}")
+                    return response
+                
+                self.get_logger().info(f"Detection completed: {detect_response.total_detections} objects found")
+                
+                # Build bounding boxes from detection response
+                bboxes = []
+                for i in range(detect_response.total_detections):
+                    bbox = [
+                        detect_response.bbox_x1[i],
+                        detect_response.bbox_y1[i],
+                        detect_response.bbox_x2[i],
+                        detect_response.bbox_y2[i]
+                    ]
+                    bboxes.append(bbox)
+                
+                if not bboxes:
+                    response.success = False
+                    response.message = "No objects detected in current frame"
+                    response.bbox = []
+                    response.confidence = 0.0
+                    self.get_logger().warn("No detections found")
+                    return response
+                
+                # Classify all detected regions using CLIP
+                self.get_logger().info(f"Classifying {len(bboxes)} detected regions...")
+                classification_data = self._classify_regions(self.captured_frame, bboxes)
+                self.latest_region_classifications = classification_data['output']['classified_regions']
+                self.latest_classification = None
+                
+                self.get_logger().info(f"Classification complete for {len(self.latest_region_classifications)} regions")
+            
+            self.get_logger().info(f"Computing CLIP embeddings for '{target_label}' and {len(self.latest_region_classifications)} regions")
+            
+            # Get text embedding for the target label
+            text_inputs = self.processor(
+                text=[target_label],
+                return_tensors="pt",
+                padding=True
+            ).to(self.device)
+            
+            with torch.no_grad():
+                text_features = self.model.get_text_features(**text_inputs)
+                # Normalize text embedding
+                text_features = text_features / text_features.norm(dim=-1, keepdim=True)
+            
+            # Compute image embeddings for each bounding box
+            best_match = None
+            best_similarity = -1.0  # Cosine similarity ranges from -1 to 1
+            
+            for region in self.latest_region_classifications:
+                bbox = region['bbox']
+                x1, y1, x2, y2 = bbox
+                
+                # Clamp bbox to image bounds
+                h, w = self.captured_frame.shape[:2]
+                x1 = max(0, min(x1, w))
+                x2 = max(0, min(x2, w))
+                y1 = max(0, min(y1, h))
+                y2 = max(0, min(y2, h))
+                
+                # Skip invalid boxes
+                if x2 <= x1 or y2 <= y1:
+                    self.get_logger().warn(f"Skipping invalid bbox: {bbox}")
+                    continue
+                
+                # Crop and convert region
+                region_bgr = self.captured_frame[y1:y2, x1:x2]
+                region_rgb = cv2.cvtColor(region_bgr, cv2.COLOR_BGR2RGB)
+                pil_image = PILImage.fromarray(region_rgb)
+                
+                # Get image embedding
+                image_inputs = self.processor(
+                    images=pil_image,
+                    return_tensors="pt"
+                ).to(self.device)
+                
+                with torch.no_grad():
+                    image_features = self.model.get_image_features(**image_inputs)
+                    # Normalize image embedding
+                    image_features = image_features / image_features.norm(dim=-1, keepdim=True)
+                
+                # Compute cosine similarity
+                similarity = (text_features @ image_features.T).item()
+                
+                self.get_logger().debug(f"Region {region['region_id']}: similarity = {similarity:.4f}")
+                
+                # Track best match
+                if similarity > best_similarity:
+                    best_similarity = similarity
+                    best_match = {
+                        'bbox': bbox,
+                        'confidence': similarity,
+                        'region_id': region['region_id']
+                    }
+            
+            # Check if any match was found
+            if best_match is None:
+                response.success = False
+                response.message = f"No valid regions found to compare with '{target_label}'"
                 response.bbox = []
                 response.confidence = 0.0
                 self.latest_found_object = None
-                self.get_logger().info(f"Label '{target_label}' not found")
+                self.get_logger().info(f"No valid regions to compare")
                 return response
             
-            # Sort by confidence and get highest
-            matching_regions.sort(key=lambda x: x['confidence'], reverse=True)
-            best_match = matching_regions[0]
-            
-            # Check confidence threshold
-            if best_match['confidence'] < 0.5:
+            # Optional: Set a minimum similarity threshold
+            min_similarity_threshold = 0.2  # Adjust based on your needs
+            if best_match['confidence'] < min_similarity_threshold:
                 response.success = False
-                response.message = f"Label '{target_label}' found but confidence too low ({best_match['confidence']:.2f} < 0.5)"
+                response.message = f"Label '{target_label}' found but similarity too low ({best_match['confidence']:.3f} < {min_similarity_threshold})"
                 response.bbox = []
                 response.confidence = float(best_match['confidence'])
                 self.latest_found_object = None
-                self.get_logger().info(f"Label '{target_label}' confidence too low: {best_match['confidence']:.2f}")
+                self.get_logger().info(f"Label '{target_label}' similarity too low: {best_match['confidence']:.3f}")
                 return response
             
             # Store for visualization
@@ -703,13 +850,14 @@ class CLIPClassifier(Node):
             
             # Return success with bbox
             response.success = True
-            response.message = f"Found '{target_label}' with confidence {best_match['confidence']:.2f}"
+            response.message = f"Found '{target_label}' with similarity {best_match['confidence']:.3f}"
             response.bbox = best_match['bbox']
             response.confidence = float(best_match['confidence'])
+            response.object_id = str(best_match['region_id'])
             
             self.get_logger().info(
                 f"Found '{target_label}': bbox={best_match['bbox']}, "
-                f"confidence={best_match['confidence']:.2f}, region_id={best_match['region_id']}"
+                f"similarity={best_match['confidence']:.3f}, region_id={best_match['region_id']}"
             )
             
         except Exception as e:
@@ -717,6 +865,7 @@ class CLIPClassifier(Node):
             response.message = f"Error: {str(e)}"
             response.bbox = []
             response.confidence = 0.0
+            self.latest_found_object = None
             self.get_logger().error(f"Find object error: {e}")
             import traceback
             self.get_logger().error(traceback.format_exc())
