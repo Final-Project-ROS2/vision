@@ -70,16 +70,10 @@ class FindObjectServiceNode(Node):
         self.get_logger().info(f'Received find_object request for label: {label}')
         
         try:
-            # Step 1: Call /vision/detect_objects
+            # Step 1: Call /vision/detect_objects (synchronously)
             self.get_logger().info('Calling /vision/detect_objects...')
             detect_req = DetectObjects.Request()
-            detect_future = self.detect_objects_client.call_async(detect_req)
-            
-            # Wait for response using while loop instead of spin_until_future_complete
-            while not detect_future.done():
-                rclpy.spin_once(self, timeout_sec=0.1)
-            
-            detect_response = detect_future.result()
+            detect_response = self.detect_objects_client.call(detect_req)
             
             if not detect_response.success:
                 response.success = False
@@ -94,17 +88,11 @@ class FindObjectServiceNode(Node):
             
             self.get_logger().info(f'Detected {detect_response.total_detections} objects')
             
-            # Step 2: Call /vision/find_object with the label
+            # Step 2: Call /vision/find_object with the label (synchronously)
             self.get_logger().info(f'Calling /vision/find_object with label: {label}...')
             find_req = FindObject.Request()
             find_req.label = label
-            find_future = self.find_object_client.call_async(find_req)
-            
-            # Wait for find_object to complete
-            while not find_future.done():
-                rclpy.spin_once(self, timeout_sec=0.1)
-            
-            find_response = find_future.result()
+            find_response = self.find_object_client.call(find_req)
             
             if not find_response.success:
                 response.success = False
@@ -117,7 +105,7 @@ class FindObjectServiceNode(Node):
                 response.z = 0.0
                 return response
             
-            # Extract object_id from find_response (assuming it's included)
+            # Extract object_id from find_response
             object_id = find_response.object_id if hasattr(find_response, 'object_id') else ''
             
             # Step 3: Calculate center of bounding box (u, v)
@@ -138,20 +126,14 @@ class FindObjectServiceNode(Node):
             
             self.get_logger().info(f'Bounding box center: ({u}, {v})')
             
-            # Step 4: Call /pixel_to_real service
+            # Step 4: Call /pixel_to_real service (synchronously)
             self.get_logger().info('Calling /pixel_to_real...')
             pixel_req = PixelToReal.Request()
             pixel_req.u = u
             pixel_req.v = v
-            pixel_future = self.pixel_to_real_client.call_async(pixel_req)
+            pixel_response = self.pixel_to_real_client.call(pixel_req)
             
-            # Wait for pixel_to_real to complete
-            while not pixel_future.done():
-                rclpy.spin_once(self, timeout_sec=0.1)
-            
-            pixel_response = pixel_future.result()
-            
-            # Step 5: Return final response with (x, y, z) coordinates and object_id
+            # Step 5: Return final response
             response.success = True
             response.message = f'Successfully found object "{label}" (ID: {object_id}) at ({pixel_response.x:.3f}, {pixel_response.y:.3f}, {pixel_response.z:.3f})'
             response.object_id = object_id
