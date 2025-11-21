@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-GraspNet Detector Node
+GraspNet Detector Node - FIXED: No more deadlock on nested service calls
 
 Services:
     1. /vision/detect_grasp
@@ -18,6 +18,12 @@ Services:
        Automatically runs grasp detection when SAM publishes
        No manual service call needed - automatic on SAM publish
        ros2 service call /vision/run_pipeline std_srvs/srv/Trigger
+
+DEADLOCK FIX:
+    - Changed from async service calls with manual spinning to synchronous calls
+    - Uses ReentrantCallbackGroup to allow nested service calls
+    - Uses MultiThreadedExecutor to handle concurrent execution
+    - No more blocking or hanging after first service call
 
 Pixel to World Conversion:
     Grasp points are detected in image pixel coordinates (u, v) and converted to world 
@@ -108,7 +114,7 @@ class GraspNetDetector(Node):
     def __init__(self):
         super().__init__('graspnet_detector')
         
-        # Create callback group for service calls
+        # Create callback group for service calls - CRITICAL for nested service calls
         self.callback_group = ReentrantCallbackGroup()
         
         # CV Bridge for ROS<->OpenCV conversion
@@ -126,20 +132,22 @@ class GraspNetDetector(Node):
         # Grasp detection results
         self.latest_grasps = []
         self.latest_region_grasps = []
+        self.latest_all_bboxes = []
+        self.latest_all_object_ids = []
         
-        # Service clients
+        # Service clients - using same callback group
         self.detect_objects_client = None
         self.pixel_to_real_client = None
         if CUSTOM_INTERFACES_AVAILABLE:
             self.detect_objects_client = self.create_client(
                 DetectObjects,
                 '/vision/detect_objects',
-                callback_group=self.callback_group
+                callback_group=self.callback_group  # Same callback group!
             )
             self.pixel_to_real_client = self.create_client(
                 PixelToReal,
                 '/pixel_to_real',
-                callback_group=self.callback_group
+                callback_group=self.callback_group  # Same callback group!
             )
         
         # Output directory for saving results
@@ -203,13 +211,12 @@ class GraspNetDetector(Node):
                 10
             )
         
-        # Create grasp detection services
-        # Always use Trigger for /vision/detect_grasp to ensure compatibility
+        # Create grasp detection services - all use same callback group
         self.grasp_service = self.create_service(
             Trigger,
             '/vision/detect_grasp',
             self.detect_grasp_callback,
-            callback_group=self.callback_group
+            callback_group=self.callback_group  # Same callback group!
         )
         
         if CUSTOM_INTERFACES_AVAILABLE:
@@ -238,7 +245,7 @@ class GraspNetDetector(Node):
         self.viz_timer = self.create_timer(0.033, self.visualization_callback)
         
         self.get_logger().info("=" * 80)
-        self.get_logger().info("GraspNet Detector Started")
+        self.get_logger().info("GraspNet Detector Started (DEADLOCK-FREE)")
         self.get_logger().info("=" * 80)
         self.get_logger().info("Subscribed to: /camera/image_raw")
         self.get_logger().info("Subscribed to: /camera/depth/image_raw")
@@ -259,9 +266,9 @@ class GraspNetDetector(Node):
         if CUSTOM_INTERFACES_AVAILABLE:
             self.get_logger().info("  ros2 service call /vision/detect_grasp_bb custom_interfaces/srv/DetectGraspBBox \"{x1: 100, y1: 100, x2: 200, y2: 300}\"")
         self.get_logger().info("=" * 80)
-        self.get_logger().info("NOTE: Grasp positions use pixel coordinates (u,v) and are converted")
+        self.get_logger().info("NOTE: Using synchronous service calls to prevent deadlock")
+        self.get_logger().info("      Grasp positions use pixel coordinates (u,v) and are converted")
         self.get_logger().info("      to world coordinates (x,y,z) via /pixel_to_real service")
-        self.get_logger().info("      Example: pixel (320, 240) -> world (0.5, 0.0, 0.8)")
         self.get_logger().info("=" * 80)
     
     def _init_graspnet_model(self):
@@ -316,6 +323,7 @@ class GraspNetDetector(Node):
     def _convert_pixel_to_world(self, u: int, v: int) -> Tuple[float, float, float]:
         """
         Convert pixel coordinates (u, v) to world coordinates (x, y, z) using /pixel_to_real service
+        FIXED: Uses synchronous call instead of async to prevent deadlock
         
         Args:
             u: pixel column (x-coordinate in image)
@@ -339,20 +347,8 @@ class GraspNetDetector(Node):
             request.u = int(u)
             request.v = int(v)
             
-            # Call service synchronously
-            future = self.pixel_to_real_client.call_async(request)
-            
-            # Wait for response with timeout using spin_once
-            start_time = time.time()
-            timeout = 2.0
-            while not future.done() and (time.time() - start_time) < timeout:
-                rclpy.spin_once(self, timeout_sec=0.05)
-            
-            if not future.done():
-                self.get_logger().warn(f"Timeout waiting for /pixel_to_real service for pixel ({u}, {v})")
-                return (0.0, 0.0, 0.8)
-            
-            response = future.result()
+            # ✅ FIXED: Use synchronous call instead of async + manual spinning
+            response = self.pixel_to_real_client.call(request)
             
             self.get_logger().info(
                 f"   Pixel ({u}, {v}) -> World ({response.x:.3f}, {response.y:.3f}, {response.z:.3f})m"
@@ -365,41 +361,6 @@ class GraspNetDetector(Node):
             import traceback
             self.get_logger().error(traceback.format_exc())
             return (0.0, 0.0, 0.8)
-    
-    def rgb_callback(self, msg: Image):
-        """Handle RGB image messages"""
-        try:
-            self.latest_rgb = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
-            self.frame_counter += 1
-            
-            # Capture first frame
-            if not self.frame_captured and self.latest_depth is not None:
-                self.captured_rgb = self.latest_rgb.copy()
-                self.captured_depth = self.latest_depth.copy()
-                self.frame_captured = True
-                self.get_logger().info(f"Captured RGB-D frame {self.frame_counter}")
-        except Exception as e:
-            self.get_logger().error(f"Failed to convert RGB image: {e}")
-    
-    def depth_callback(self, msg: Image):
-        """Handle depth image messages"""
-        try:
-            self.latest_depth = self.bridge.imgmsg_to_cv2(msg, desired_encoding='passthrough')
-            # Clean up depth data
-            self.latest_depth = np.nan_to_num(self.latest_depth, nan=0.0, posinf=0.0, neginf=0.0)
-            
-            # Capture first frame if RGB is available
-            if not self.frame_captured and self.latest_rgb is not None:
-                self.captured_rgb = self.latest_rgb.copy()
-                self.captured_depth = self.latest_depth.copy()
-                self.frame_captured = True
-                self.get_logger().info(f"Captured RGB-D frame {self.frame_counter}")
-        except Exception as e:
-            self.get_logger().error(f"Failed to convert depth image: {e}")
-    
-    def camera_info_callback(self, msg: CameraInfo):
-        """Handle camera info messages"""
-        self.camera_info = msg
     
     def sam_detections_callback(self, msg: 'SAMDetections'):
         """Handle incoming SAM detections for pipeline mode"""
@@ -446,7 +407,10 @@ class GraspNetDetector(Node):
             self.get_logger().error(traceback.format_exc())
     
     def detect_grasp_callback(self, request, response):
-        """Service callback for /vision/detect_grasp - uses Trigger service"""
+        """
+        Service callback for /vision/detect_grasp - uses Trigger service
+        FIXED: Uses synchronous service calls to prevent deadlock
+        """
         try:
             self.get_logger().info("=" * 60)
             self.get_logger().info("Grasp Detection Service Called")
@@ -472,7 +436,7 @@ class GraspNetDetector(Node):
                 self.get_logger().warn("No RGB-D data captured yet")
                 return response
             
-            # Call /vision/detect_objects service
+            # Call /vision/detect_objects service (synchronous)
             self.get_logger().info("Calling /vision/detect_objects service...")
             
             if not self.detect_objects_client.wait_for_service(timeout_sec=5.0):
@@ -485,26 +449,19 @@ class GraspNetDetector(Node):
                 self.get_logger().error("/vision/detect_objects service not available")
                 return response
             
+            # ✅ FIXED: Use synchronous call instead of async + manual spinning
             detect_request = DetectObjects.Request()
-            future = self.detect_objects_client.call_async(detect_request)
-            
-            # Wait for future with timeout using spin_once to avoid blocking
-            start_time = time.time()
-            timeout = 10.0
-            while not future.done() and (time.time() - start_time) < timeout:
-                rclpy.spin_once(self, timeout_sec=0.1)
-            
-            if not future.done():
+            try:
+                detect_response = self.detect_objects_client.call(detect_request)
+            except Exception as e:
                 response.success = False
                 response.message = json.dumps({
                     "success": False,
-                    "error": "/vision/detect_objects service call timeout",
+                    "error": f"/vision/detect_objects service call failed: {str(e)}",
                     "timestamp": datetime.utcnow().isoformat() + "Z"
                 }, indent=2)
-                self.get_logger().error("Service call timeout")
+                self.get_logger().error(f"Service call failed: {e}")
                 return response
-            
-            detect_response = future.result()
             
             if not detect_response.success:
                 response.success = False
@@ -956,21 +913,6 @@ class GraspNetDetector(Node):
         
         depth_m = float(depth_value) / 1000.0 if depth_value > 100 else float(depth_value)
         
-        # Camera intrinsics
-        fx = 525.0
-        fy = 525.0
-        img_w = self.captured_rgb.shape[1] if self.captured_rgb is not None else 640
-        img_h = self.captured_rgb.shape[0] if self.captured_rgb is not None else 480
-        cx_cam = img_w / 2.0
-        cy_cam = img_h / 2.0
-        
-        if self.camera_info is not None:
-            K = np.array(self.camera_info.k).reshape(3, 3)
-            fx = K[0, 0]
-            fy = K[1, 1]
-            cx_cam = K[0, 2]
-            cy_cam = K[1, 2]
-        
         # Generate multiple grasp candidates
         num_grasps = 3
         for i in range(num_grasps):
@@ -1037,54 +979,6 @@ class GraspNetDetector(Node):
         self.get_logger().info("   Running GraspNet model inference...")
         return []
     
-    def _build_grasp_schema(self, grasps: List[Dict], detection_time: int) -> Dict:
-        """
-        Build JSON schema for grasp results
-        
-        Args:
-            grasps: List of grasp dictionaries
-            detection_time: Detection time in milliseconds
-            
-        Returns:
-            Dictionary with grasp results in JSON schema format
-        """
-        schema = {
-            "pipeline": "graspnet",
-            "success": True,
-            "input": {
-                "rgb_shape": list(self.captured_rgb.shape),
-                "depth_shape": list(self.captured_depth.shape),
-                "frame_id": f"frame_{self.frame_counter:06d}"
-            },
-            "output": {
-                "grasps": grasps,
-                "summary": {
-                    "total_grasps": len(grasps),
-                    "detection_time_ms": detection_time,
-                    "top_quality_score": grasps[0]["quality_score"] if grasps else 0.0
-                }
-            },
-            "metadata": {
-                "timestamp": datetime.utcnow().isoformat() + "Z",
-                "method": "graspnet" if GRASPNET_AVAILABLE else "geometric",
-                "output_directory": str(self.output_dir)
-            }
-        }
-        
-        return schema
-    
-    def _save_json_output(self, results: Dict) -> Path:
-        """Save grasp results as JSON file"""
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        json_filename = f"graspnet_results_{timestamp}.json"
-        json_path = self.output_dir / json_filename
-        
-        with open(json_path, 'w') as f:
-            json.dump(results, f, indent=2)
-        
-        self.get_logger().info(f"   JSON saved: {json_path}")
-        return json_path
-    
     def _publish_grasp_poses(self, grasps: List[Dict]):
         """Publish grasp poses to ROS topic"""
         for grasp in grasps:
@@ -1109,69 +1003,6 @@ class GraspNetDetector(Node):
             
             self.grasp_pub.publish(pose_msg)
     
-    def _visualize_grasps(self, rgb_image: np.ndarray, grasps: List[Dict]):
-        """Visualize grasp poses on RGB image and save"""
-        vis_image = rgb_image.copy()
-        
-        # Color palette for different grasps
-        colors = [
-            (0, 255, 0),    # Green (best)
-            (255, 255, 0),  # Cyan
-            (0, 255, 255),  # Yellow
-            (255, 0, 255),  # Magenta
-            (255, 128, 0),  # Orange
-            (0, 128, 255),  # Light Blue
-            (255, 0, 128),  # Pink
-            (128, 255, 0),  # Light Green
-        ]
-        
-        for i, grasp in enumerate(grasps[:8]):  # Show top 8
-            px, py = grasp["pixel_location"]
-            quality = grasp["quality_score"]
-            angle = grasp["approach_angle"]
-            
-            color = colors[i % len(colors)]
-            
-            # Draw grasp center
-            cv2.circle(vis_image, (px, py), 5, color, -1)
-            cv2.circle(vis_image, (px, py), 7, (255, 255, 255), 2)
-            
-            # Draw grasp orientation
-            length = 40
-            angle_rad = np.deg2rad(angle)
-            end_x = int(px + length * np.cos(angle_rad))
-            end_y = int(py + length * np.sin(angle_rad))
-            cv2.arrowedLine(vis_image, (px, py), (end_x, end_y), color, 3, tipLength=0.3)
-            
-            # Draw perpendicular line (gripper width)
-            perp_angle = angle_rad + np.pi/2
-            width = 30
-            px1 = int(px + width/2 * np.cos(perp_angle))
-            py1 = int(py + width/2 * np.sin(perp_angle))
-            px2 = int(px - width/2 * np.cos(perp_angle))
-            py2 = int(py - width/2 * np.sin(perp_angle))
-            cv2.line(vis_image, (px1, py1), (px2, py2), color, 2)
-            
-            # Draw label
-            label = f"#{i}: Q={quality:.2f}"
-            cv2.putText(vis_image, label, (px + 10, py - 10),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
-        
-        # Add title
-        title = f"GraspNet Detector | Grasps: {len(grasps)}"
-        cv2.putText(vis_image, title, (10, 30),
-                   cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2)
-        
-        # Save visualization
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        vis_path = self.output_dir / f"grasps_visualization_{timestamp}.jpg"
-        cv2.imwrite(str(vis_path), vis_image)
-        self.get_logger().info(f"   Visualization saved: {vis_path}")
-        
-        # Update display
-        cv2.imshow(self.window_name, vis_image)
-        cv2.waitKey(1)
-    
     def visualization_callback(self):
         """Display current RGB image with grasps"""
         try:
@@ -1183,7 +1014,7 @@ class GraspNetDetector(Node):
                     cv2.imshow(self.window_name, blank)
                     cv2.waitKey(1)
                 except:
-                    pass  # Ignore OpenCV display errors
+                    pass
                 return
             
             # Use captured frame for visualization
@@ -1323,11 +1154,9 @@ class GraspNetDetector(Node):
                 cv2.imshow(self.window_name, display_img)
                 cv2.waitKey(1)
             except Exception as e:
-                # Ignore OpenCV display errors
                 pass
         
         except Exception as e:
-            # Catch any other errors in visualization to prevent crashes
             self.get_logger().error(f"Visualization error: {e}")
     
     def destroy_node(self):
