@@ -163,6 +163,14 @@ class GraspNetDetector(Node):
         except Exception as e:
             self.get_logger().warn(f"Could not create OpenCV window: {e}")
             self.get_logger().warn("Continuing without visualization window")
+
+        # Parameter toggles simulated vs hardware camera topics
+        self.declare_parameter('real_hardware', False)
+        self.real_hardware = bool(self.get_parameter('real_hardware').value)
+
+        self.rgb_topic = '/camera/color/image_raw' if self.real_hardware else '/camera/image_raw'
+        self.depth_topic = '/camera/depth/image_rect_raw' if self.real_hardware else '/camera/depth/image_raw'
+        self.camera_info_topic = 'camera/color/camera_info' if self.real_hardware else '/camera/camera_info'
         
         # QoS profiles
         self.image_qos = QoSProfile(
@@ -183,21 +191,21 @@ class GraspNetDetector(Node):
         # Subscribe to camera topics
         self.rgb_sub = self.create_subscription(
             Image,
-            '/camera/image_raw',
+            self.rgb_topic,
             self.rgb_callback,
             self.image_qos
         )
         
         self.depth_sub = self.create_subscription(
             Image,
-            '/camera/depth/image_raw',
+            self.depth_topic,
             self.depth_callback,
             self.image_qos
         )
         
         self.camera_info_sub = self.create_subscription(
             CameraInfo,
-            '/camera/camera_info',
+            self.camera_info_topic,
             self.camera_info_callback,
             self.detection_qos
         )
@@ -247,9 +255,10 @@ class GraspNetDetector(Node):
         self.get_logger().info("=" * 80)
         self.get_logger().info("GraspNet Detector Started (DEADLOCK-FREE)")
         self.get_logger().info("=" * 80)
-        self.get_logger().info("Subscribed to: /camera/image_raw")
-        self.get_logger().info("Subscribed to: /camera/depth/image_raw")
-        self.get_logger().info("Subscribed to: /camera/camera_info")
+        self.get_logger().info(f"Subscribed to: {self.rgb_topic}")
+        self.get_logger().info(f"Subscribed to: {self.depth_topic}")
+        self.get_logger().info(f"Subscribed to: {self.camera_info_topic}")
+        self.get_logger().info(f"real_hardware parameter: {self.real_hardware}")
         if CUSTOM_INTERFACES_AVAILABLE:
             self.get_logger().info("Subscribed to: /vision/sam_detections")
             self.get_logger().info("Service client: /pixel_to_real (for pixel to world conversion)")

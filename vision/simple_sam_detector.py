@@ -48,6 +48,14 @@ class SimpleSAMDetector(Node):
 
     def __init__(self, single_shot_mode=False):
         super().__init__('simple_sam_detector')
+
+        # Parameter toggles camera topics for hardware vs simulation
+        self.declare_parameter('real_hardware', False)
+        self.real_hardware = bool(self.get_parameter('real_hardware').value)
+
+        self.rgb_topic = '/camera/color/image_raw' if self.real_hardware else '/camera/image_raw'
+        self.depth_topic = '/camera/depth/image_rect_raw' if self.real_hardware else '/camera/depth/image_raw'
+        self.camera_info_topic = 'camera/color/camera_info' if self.real_hardware else '/camera/camera_info'
         
         # Mode configuration - Default to single shot for faster service response
         self.single_shot_mode = True  # Force single shot mode for service efficiency
@@ -75,7 +83,7 @@ class SimpleSAMDetector(Node):
         # Subscribe to camera
         self.rgb_sub = self.create_subscription(
             Image,
-            '/camera/image_raw',
+            self.rgb_topic,
             self.rgb_callback,
             self.image_qos
         )
@@ -83,7 +91,7 @@ class SimpleSAMDetector(Node):
         # Subscribe to depth  (for Graspnet)
         self.depth_sub = self.create_subscription(
             Image,
-            '/camera/depth/image_raw',
+            self.depth_topic,
             self.depth_callback,
             self.image_qos
         )
@@ -134,7 +142,7 @@ class SimpleSAMDetector(Node):
         )
         
         # OpenCV window setup
-        self.window_name = "SAM Object Detection - /camera/image_raw"
+        self.window_name = f"SAM Object Detection - {self.rgb_topic}"
         cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL)
         cv2.resizeWindow(self.window_name, 800, 600)
         
@@ -145,8 +153,10 @@ class SimpleSAMDetector(Node):
         self.get_logger().info("=" * 80)
         self.get_logger().info(f"Simple SAM Detector Started [{mode_str}]")
         self.get_logger().info("=" * 80)
-        self.get_logger().info(f"Subscribing to: /camera/image_raw")
-        self.get_logger().info(f"Subscribing to: /camera/depth/image_raw")
+        self.get_logger().info(f"Subscribing to: {self.rgb_topic}")
+        self.get_logger().info(f"Subscribing to: {self.depth_topic}")
+        self.get_logger().info(f"Camera info topic: {self.camera_info_topic}")
+        self.get_logger().info(f"real_hardware parameter: {self.real_hardware}")
         self.get_logger().info(f"Will capture ONE frame for efficient detection")
         self.get_logger().info(f"Service: /vision/run_pipeline (publish to topic)")
         self.get_logger().info(f"Service: /vision/detect_objects (return in response)")
@@ -166,7 +176,7 @@ class SimpleSAMDetector(Node):
         self._heartbeat_timer = self.create_timer(5.0, self._heartbeat_callback)
     
     def rgb_callback(self, msg: Image):
-        """Handle incoming RGB images from /camera/image_raw"""
+        """Handle incoming RGB images from configured RGB topic"""
         try:
             # Convert ROS Image message to OpenCV format (BGR8)
             self.latest_rgb = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
@@ -212,7 +222,7 @@ class SimpleSAMDetector(Node):
                 response.success = False
                 response.message = json.dumps({
                     "success": False,
-                    "error": "No image available from /camera/image_raw",
+                    "error": f"No image available from {self.rgb_topic}",
                     "timestamp": datetime.utcnow().isoformat() + "Z"
                 }, indent=2)
                 self.get_logger().warn("No image received yet")
@@ -293,7 +303,7 @@ class SimpleSAMDetector(Node):
                 response.bbox_y2 = []
                 response.confidences = []
                 response.distances_cm = []
-                response.error_message = "No image available from /camera/image_raw"
+                response.error_message = f"No image available from {self.rgb_topic}"
                 self.get_logger().warn("No image received yet")
                 return response
             
@@ -520,7 +530,7 @@ class SimpleSAMDetector(Node):
         try:
             if self.latest_depth is None:
                 response.success = False
-                response.message = "No depth image received yet from /camera/depth/image_raw."
+                response.message = f"No depth image received yet from {self.depth_topic}."
                 self.get_logger().warn("No depth image available")
                 return response
             
@@ -529,7 +539,7 @@ class SimpleSAMDetector(Node):
             depth_colormap = cv2.applyColorMap(normalized_depth.astype(np.uint8), cv2.COLORMAP_JET)
             
             # Create window if it doesn't exist
-            depth_window = "Depth Camera Image - /camera/depth/image_raw"
+            depth_window = f"Depth Camera Image - {self.depth_topic}"
             cv2.namedWindow(depth_window, cv2.WINDOW_NORMAL)
             cv2.resizeWindow(depth_window, 800, 600)
             
@@ -885,7 +895,7 @@ class SimpleSAMDetector(Node):
             blank = np.zeros((480, 640, 3), dtype=np.uint8)
             cv2.putText(
                 blank, 
-                "Waiting for /camera/image_raw...", 
+                f"Waiting for {self.rgb_topic}...", 
                 (100, 240),
                 cv2.FONT_HERSHEY_SIMPLEX, 
                 1.0, 
