@@ -62,6 +62,14 @@ class SAMCLIPPipeline(Node):
     
     def __init__(self):
         super().__init__('sam_clip_pipeline')
+
+        self.declare_parameter('real_hardware', False)
+        self.real_hardware = bool(self.get_parameter('real_hardware').value)
+
+        self.rgb_topic = '/camera/color/image_raw' if self.real_hardware else '/camera/image_raw'
+        self.depth_topic = '/camera/depth/image_rect_raw' if self.real_hardware else '/camera/depth/image_raw'
+        self.camera_info_topic = 'camera/color/camera_info' if self.real_hardware else '/camera/camera_info'
+        self.desired_encoding = 'passthrough' if self.real_hardware else 'bgr8'
         
         # Default classification labels
         self.candidate_labels = [
@@ -110,7 +118,7 @@ class SAMCLIPPipeline(Node):
         self.get_logger().info("📡 Subscribing to /camera/image_raw...")
         self.rgb_sub = self.create_subscription(
             Image,
-            '/camera/image_raw',
+            self.rgb_topic,
             self.rgb_callback,
             self.image_qos
         )
@@ -165,7 +173,7 @@ class SAMCLIPPipeline(Node):
         try:
             if not self.frame_captured:
                 # Convert ROS Image message to OpenCV format (BGR8)
-                self.captured_frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
+                self.captured_frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding=self.desired_encoding)
                 self.frame_counter += 1
                 self.frame_captured = True
                 

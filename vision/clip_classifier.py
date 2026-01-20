@@ -103,6 +103,15 @@ class CLIPClassifier(Node):
     def __init__(self, candidate_labels: List[str] = None):
         super().__init__('clip_classifier')
         
+        # Parameter toggles camera topics between simulation and hardware
+        self.declare_parameter('real_hardware', False)
+        self.real_hardware = bool(self.get_parameter('real_hardware').value)
+
+        self.rgb_topic = '/camera/color/image_raw' if self.real_hardware else '/camera/image_raw'
+        self.depth_topic = '/camera/depth/image_rect_raw' if self.real_hardware else '/camera/depth/image_raw'
+        self.camera_info_topic = 'camera/color/camera_info' if self.real_hardware else '/camera/camera_info'
+        self.desired_encoding = 'passthrough' if self.real_hardware else 'bgr8'
+
         # Default labels if none provided
         self.candidate_labels = candidate_labels or [
             # "cobot",
@@ -184,7 +193,7 @@ class CLIPClassifier(Node):
         # Subscribe to camera
         self.rgb_sub = self.create_subscription(
             Image,
-            '/camera/image_raw',
+            self.rgb_topic,
             self.rgb_callback,
             self.image_qos
         )
@@ -249,7 +258,7 @@ class CLIPClassifier(Node):
             self.get_logger().warn("Subscribing to: /vision/sam_detections (placeholder Image). Build msgs for full integration.")
         
         # OpenCV window setup
-        self.window_name = "CLIP Classifier - /camera/image_raw"
+        self.window_name = f"CLIP Classifier - {self.rgb_topic}"
         cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL)
         cv2.resizeWindow(self.window_name, 800, 600)
         
@@ -257,7 +266,10 @@ class CLIPClassifier(Node):
         self.viz_timer = self.create_timer(0.033, self.visualization_callback)
         
         self.get_logger().info("CLIP Classifier Started")
-        self.get_logger().info(f"Subscribing to: /camera/image_raw")
+        self.get_logger().info(f"Subscribing to: {self.rgb_topic}")
+        self.get_logger().info(f"Depth topic (unused currently): {self.depth_topic}")
+        self.get_logger().info(f"Camera info topic (unused currently): {self.camera_info_topic}")
+        self.get_logger().info(f"real_hardware parameter: {self.real_hardware}")
         self.get_logger().info(f"Model: openai/clip-vit-base-patch32")
         self.get_logger().info(f"Labels: {', '.join(self.candidate_labels)}")
         self.get_logger().info(f"Device: {self.device}")
@@ -291,10 +303,10 @@ class CLIPClassifier(Node):
             self.processor = None
     
     def rgb_callback(self, msg: Image):
-        """Handle incoming RGB images from /camera/image_raw"""
+        """Handle incoming RGB images from configured RGB topic"""
         try:
             # Convert ROS Image message to OpenCV format (BGR8)
-            self.latest_rgb = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
+            self.latest_rgb = self.bridge.imgmsg_to_cv2(msg, desired_encoding=self.desired_encoding)
             self.frame_counter += 1
             
             # Capture first frame for classification
@@ -314,7 +326,7 @@ class CLIPClassifier(Node):
                 response.message = json.dumps({
                     "pipeline": "single_clip",
                     "success": False,
-                    "error": "No frame captured yet from /camera/image_raw",
+                    "error": f"No frame captured yet from {self.rgb_topic}",
                     "timestamp": datetime.utcnow().isoformat() + "Z"
                 }, indent=2)
                 self.get_logger().warn("No frame captured yet")
@@ -369,7 +381,7 @@ class CLIPClassifier(Node):
                 response.label = ""
                 response.confidence = 0.0
                 response.all_predictions = json.dumps({
-                    "error": "No frame captured yet from /camera/image_raw",
+                    "error": f"No frame captured yet from {self.rgb_topic}",
                     "timestamp": datetime.utcnow().isoformat() + "Z"
                 })
                 self.get_logger().warn("No frame captured yet")
@@ -428,7 +440,7 @@ class CLIPClassifier(Node):
             if self.captured_frame is None:
                 response.success = False
                 response.message = json.dumps({
-                    "error": "No frame captured yet from /camera/image_raw",
+                    "error": f"No frame captured yet from {self.rgb_topic}",
                     "timestamp": datetime.utcnow().isoformat() + "Z"
                 }, indent=2)
                 self.get_logger().warn("No frame captured yet")
@@ -495,7 +507,7 @@ class CLIPClassifier(Node):
             if self.captured_frame is None:
                 response.success = False
                 response.message = json.dumps({
-                    "error": "No frame captured yet from /camera/image_raw",
+                    "error": f"No frame captured yet from {self.rgb_topic}",
                     "timestamp": datetime.utcnow().isoformat() + "Z"
                 }, indent=2)
                 self.get_logger().warn("No frame captured yet")
@@ -582,7 +594,7 @@ class CLIPClassifier(Node):
                 return
             
             if self.captured_frame is None:
-                self.get_logger().warn("No captured frame, waiting for /camera/image_raw")
+                self.get_logger().warn(f"No captured frame, waiting for {self.rgb_topic}")
                 return
 
             # Extract bboxes from SAMDetections message
@@ -659,7 +671,7 @@ class CLIPClassifier(Node):
             
             if self.captured_frame is None:
                 response.success = False
-                response.message = "No frame captured yet from /camera/image_raw"
+                response.message = f"No frame captured yet from {self.rgb_topic}"
                 response.bbox = []
                 response.confidence = 0.0
                 self.get_logger().warn("No captured frame available")
@@ -1055,7 +1067,7 @@ class CLIPClassifier(Node):
             blank = np.zeros((480, 640, 3), dtype=np.uint8)
             cv2.putText(
                 blank, 
-                "Waiting to capture frame from /camera/image_raw...", 
+                f"Waiting to capture frame from {self.rgb_topic}...", 
                 (50, 240),
                 cv2.FONT_HERSHEY_SIMPLEX, 
                 0.8, 

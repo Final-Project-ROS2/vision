@@ -105,9 +105,29 @@ class PixelToRealServer(Node):
     def __init__(self,
                  rgb_topic: str = '/camera/image_raw',
                  depth_topic: str = '/camera/depth/image_raw',
-                 info_topic: str = '/camera/color/camera_info',
+                 info_topic: str = '/camera/camera_info',
                  default_target_frame: str = 'world'):
         super().__init__('pixel_to_real_server')
+
+        # Parameter toggles simulated vs hardware camera topics
+        self.declare_parameter('real_hardware', False)
+        self.real_hardware = bool(self.get_parameter('real_hardware').value)
+
+        if self.real_hardware:
+            self.rgb_topic = '/camera/color/image_raw'
+            self.depth_topic = '/camera/depth/image_rect_raw'
+            self.camera_info_topic = 'camera/color/camera_info'
+            self.color_encoding = 'passthrough'
+            self.depth_32_encoding = 'passthrough'
+            self.depth_16_encoding = 'passthrough'
+        else:
+            self.rgb_topic = rgb_topic or '/camera/image_raw'
+            self.depth_topic = depth_topic or '/camera/depth/image_raw'
+            self.camera_info_topic = info_topic or '/camera/camera_info'
+            self.color_encoding = 'bgr8'
+            self.depth_32_encoding = '32FC1'
+            self.depth_16_encoding = '16UC1'
+
         self.bridge = CvBridge()
         self.latest_rgb = None
         self.latest_rgb_header = None
@@ -116,9 +136,9 @@ class PixelToRealServer(Node):
         self.camera_info = None
         self.default_target_frame = default_target_frame
 
-        self.rgb_sub = self.create_subscription(Image, rgb_topic, self.rgb_cb, 10)
-        self.depth_sub = self.create_subscription(Image, depth_topic, self.depth_cb, 10)
-        self.info_sub = self.create_subscription(CameraInfo, info_topic, self.info_cb, 10)
+        self.rgb_sub = self.create_subscription(Image, self.rgb_topic, self.rgb_cb, 10)
+        self.depth_sub = self.create_subscription(Image, self.depth_topic, self.depth_cb, 10)
+        self.info_sub = self.create_subscription(CameraInfo, self.camera_info_topic, self.info_cb, 10)
 
         # Publisher for debug visualization
         self.debug_pub = self.create_publisher(Image, '/pixel_to_real/debug_image', 10)
@@ -172,6 +192,10 @@ class PixelToRealServer(Node):
         self.get_logger().info(f'Validation point: drill at (466,160)->(0.572,-0.241,0.832)')
         self.get_logger().info(f'Validation point: monkey_wrench at (150,200)->(0.624,0.373,0.807)')
         self.get_logger().info(f'Depth calibration: Call service at (320,240) to set depth reference for z=0.8m')
+        self.get_logger().info(f'RGB topic: {self.rgb_topic}')
+        self.get_logger().info(f'Depth topic: {self.depth_topic}')
+        self.get_logger().info(f'Camera info topic: {self.camera_info_topic}')
+        self.get_logger().info(f'real_hardware parameter: {self.real_hardware}')
 
         # Store calibration validation points for accuracy checking
         self.validation_points = [
@@ -199,7 +223,7 @@ class PixelToRealServer(Node):
     def rgb_cb(self, msg: Image):
         """Store the latest RGB image for pixel coordinate validation."""
         try:
-            rgb_img = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
+            rgb_img = self.bridge.imgmsg_to_cv2(msg, desired_encoding=self.color_encoding)
             self.latest_rgb = rgb_img
             self.latest_rgb_header = msg.header
         except Exception as e:
@@ -209,10 +233,10 @@ class PixelToRealServer(Node):
         # Support 32FC1 and 16UC1 encodings; convert to float32 meters.
         try:
             if msg.encoding == '32FC1' or msg.encoding == '32F':
-                depth_img = self.bridge.imgmsg_to_cv2(msg, desired_encoding='32FC1')
+                depth_img = self.bridge.imgmsg_to_cv2(msg, desired_encoding=self.depth_32_encoding)
                 depth = depth_img.astype(np.float32)
             elif msg.encoding == '16UC1' or msg.encoding == '16U':
-                d16 = self.bridge.imgmsg_to_cv2(msg, desired_encoding='16UC1')
+                d16 = self.bridge.imgmsg_to_cv2(msg, desired_encoding=self.depth_16_encoding)
                 depth = d16.astype(np.float32) / 1000.0  # assume mm -> m
             else:
                 # Try a generic conversion to float32

@@ -101,6 +101,15 @@ class SceneUnderstandingNode(Node):
     def __init__(self):
         super().__init__('scene_understanding')
         
+        # Parameter toggles simulated vs hardware camera topics
+        self.declare_parameter('real_hardware', False)
+        self.real_hardware = bool(self.get_parameter('real_hardware').value)
+
+        self.rgb_topic = '/camera/color/image_raw' if self.real_hardware else '/camera/image_raw'
+        self.depth_topic = '/camera/depth/image_rect_raw' if self.real_hardware else '/camera/depth/image_raw'
+        self.camera_info_topic = 'camera/color/camera_info' if self.real_hardware else '/camera/camera_info'
+        self.desired_encoding = 'passthrough' if self.real_hardware else 'bgr8'
+
         # Create callback group for service calls
         self.callback_group = ReentrantCallbackGroup()
         
@@ -153,7 +162,7 @@ class SceneUnderstandingNode(Node):
         # Subscribe to camera RGB for visualization
         self.rgb_sub = self.create_subscription(
             Image,
-            '/camera/image_raw',
+            self.rgb_topic,
             self.rgb_callback,
             self.image_qos
         )
@@ -197,7 +206,10 @@ class SceneUnderstandingNode(Node):
         self.get_logger().info("=" * 80)
         self.get_logger().info("Scene Understanding Node Started")
         self.get_logger().info("=" * 80)
-        self.get_logger().info("Subscribed to: /camera/image_raw")
+        self.get_logger().info(f"Subscribed to: {self.rgb_topic}")
+        self.get_logger().info(f"Depth topic (unused currently): {self.depth_topic}")
+        self.get_logger().info(f"Camera info topic (unused currently): {self.camera_info_topic}")
+        self.get_logger().info(f"real_hardware parameter: {self.real_hardware}")
         if CUSTOM_INTERFACES_AVAILABLE:
             self.get_logger().info("Subscribed to: /vision/sam_detections")
         self.get_logger().info(f"Output Directory: {self.output_dir}")
@@ -215,7 +227,7 @@ class SceneUnderstandingNode(Node):
     def rgb_callback(self, msg: Image):
         """Handle RGB image messages for visualization"""
         try:
-            self.latest_rgb = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
+            self.latest_rgb = self.bridge.imgmsg_to_cv2(msg, desired_encoding=self.desired_encoding)
         except Exception as e:
             self.get_logger().error(f"Failed to convert RGB image: {e}")
     
