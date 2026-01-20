@@ -117,10 +117,16 @@ class PixelToRealServer(Node):
             self.rgb_topic = '/camera/color/image_raw'
             self.depth_topic = '/camera/depth/image_rect_raw'
             self.camera_info_topic = 'camera/color/camera_info'
+            self.color_encoding = 'passthrough'
+            self.depth_32_encoding = 'passthrough'
+            self.depth_16_encoding = 'passthrough'
         else:
             self.rgb_topic = rgb_topic or '/camera/image_raw'
             self.depth_topic = depth_topic or '/camera/depth/image_raw'
             self.camera_info_topic = info_topic or '/camera/camera_info'
+            self.color_encoding = 'bgr8'
+            self.depth_32_encoding = '32FC1'
+            self.depth_16_encoding = '16UC1'
 
         self.bridge = CvBridge()
         self.latest_rgb = None
@@ -217,7 +223,7 @@ class PixelToRealServer(Node):
     def rgb_cb(self, msg: Image):
         """Store the latest RGB image for pixel coordinate validation."""
         try:
-            rgb_img = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
+            rgb_img = self.bridge.imgmsg_to_cv2(msg, desired_encoding=self.color_encoding)
             self.latest_rgb = rgb_img
             self.latest_rgb_header = msg.header
         except Exception as e:
@@ -227,10 +233,10 @@ class PixelToRealServer(Node):
         # Support 32FC1 and 16UC1 encodings; convert to float32 meters.
         try:
             if msg.encoding == '32FC1' or msg.encoding == '32F':
-                depth_img = self.bridge.imgmsg_to_cv2(msg, desired_encoding='32FC1')
+                depth_img = self.bridge.imgmsg_to_cv2(msg, desired_encoding=self.depth_32_encoding)
                 depth = depth_img.astype(np.float32)
             elif msg.encoding == '16UC1' or msg.encoding == '16U':
-                d16 = self.bridge.imgmsg_to_cv2(msg, desired_encoding='16UC1')
+                d16 = self.bridge.imgmsg_to_cv2(msg, desired_encoding=self.depth_16_encoding)
                 depth = d16.astype(np.float32) / 1000.0  # assume mm -> m
             else:
                 # Try a generic conversion to float32

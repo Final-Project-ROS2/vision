@@ -108,6 +108,7 @@ class SceneUnderstandingNode(Node):
         self.rgb_topic = '/camera/color/image_raw' if self.real_hardware else '/camera/image_raw'
         self.depth_topic = '/camera/depth/image_rect_raw' if self.real_hardware else '/camera/depth/image_raw'
         self.camera_info_topic = 'camera/color/camera_info' if self.real_hardware else '/camera/camera_info'
+        self.desired_encoding = 'passthrough' if self.real_hardware else 'bgr8'
 
         # Create callback group for service calls
         self.callback_group = ReentrantCallbackGroup()
@@ -226,7 +227,7 @@ class SceneUnderstandingNode(Node):
     def rgb_callback(self, msg: Image):
         """Handle RGB image messages for visualization"""
         try:
-            self.latest_rgb = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
+            self.latest_rgb = self.bridge.imgmsg_to_cv2(msg, desired_encoding=self.desired_encoding)
         except Exception as e:
             self.get_logger().error(f"Failed to convert RGB image: {e}")
     
