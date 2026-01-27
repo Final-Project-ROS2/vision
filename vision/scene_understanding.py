@@ -43,6 +43,7 @@ from typing import List, Dict, Tuple
 from collections import Counter
 from pathlib import Path
 
+
 # Import custom interfaces
 try:
     from custom_interfaces.srv import DetectObjects, UnderstandScene, DetectGrasps
@@ -119,6 +120,8 @@ class SceneUnderstandingNode(Node):
         # Latest scene understanding result
         self.latest_scene = None
         self.latest_rgb = None
+        self.captured_frame = None
+        self.frame_captured = False
         
         # Output directory for saving visualizations
         self.output_dir = Path.home() / "scene_understanding_outputs"
@@ -246,6 +249,10 @@ class SceneUnderstandingNode(Node):
     
     def understand_scene_callback(self, request, response):
         """Service callback for /vision/understand_scene - uses Trigger service"""
+        import time
+        start = time.perf_counter()
+        time.sleep(0.01)
+
         try:
             self.get_logger().info("=" * 60)
             self.get_logger().info("Scene Understanding Service Called - Analyzing...")
@@ -361,8 +368,8 @@ class SceneUnderstandingNode(Node):
                 objects_with_relations[obj_id] = {
                     "label": obj.class_label,
                     "confidence": round(obj.classification_conf, 2),
-                    "bbox": obj.bbox,
-                    "center": obj.center,
+                    "bbox": obj.bbox.tolist() if hasattr(obj.bbox, 'tolist') else obj.bbox,
+                    "center": obj.center.tolist() if hasattr(obj.center, 'tolist') else obj.center,
                     "distance_cm": round(obj.distance_cm, 1) if obj.distance_cm > 0 else None,
                     "has_grasp": obj.has_grasp,
                     "grasp_quality": round(obj.grasp_quality, 2) if obj.has_grasp else None,
@@ -405,6 +412,12 @@ class SceneUnderstandingNode(Node):
             self.get_logger().error(f"Scene understanding error: {e}")
             import traceback
             self.get_logger().error(traceback.format_exc())
+
+        import traceback
+        self.get_logger().error(traceback.format_exc())
+        end = time.perf_counter()
+        latency = end - start
+        self.get_logger().info(f"Total detection latency: {latency:.6f} seconds")
         
         return response
     
@@ -937,7 +950,7 @@ class SceneUnderstandingNode(Node):
             return
         
         # Display latest scene understanding
-        self._visualize_scene(self.latest_rgb, self.latest_scene)
+        # TODO: Add visualization display logic here
     
     def destroy_node(self):
         """Cleanup on shutdown"""

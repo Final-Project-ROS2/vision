@@ -320,6 +320,13 @@ class CLIPClassifier(Node):
     
     def classify_all_callback(self, request, response):
         """Service callback for /vision/classify_all - classify entire image"""
+        
+        import time
+        start = time.perf_counter()
+        time.sleep(0.01)
+        # Use captured frame instead of latest_rgb for consistency
+        frame_to_use = self.captured_frame if self.frame_captured else self.latest_rgb"
+
         try:
             if self.captured_frame is None:
                 response.success = False
@@ -370,6 +377,12 @@ class CLIPClassifier(Node):
             self.get_logger().error(f"Classification error: {e}")
             import traceback
             self.get_logger().error(traceback.format_exc())
+            
+        import traceback
+        self.get_logger().error(traceback.format_exc())
+        end = time.perf_counter()
+        latency = end - start
+        self.get_logger().info(f""Total detection latency: {latency:.6f} seconds"")"    
         
         return response
     

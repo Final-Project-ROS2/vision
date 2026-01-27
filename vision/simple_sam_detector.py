@@ -291,6 +291,10 @@ class SimpleSAMDetector(Node):
     def detect_objects_callback(self, request, response):
         """Service callback for /vision/detect_objects - returns detection results directly"""
         try:
+            ######################################################
+            import time
+            start = time.perf_counter()
+            time.sleep(0.01)
             # Use captured frame instead of latest_rgb for consistency
             frame_to_use = self.captured_frame if self.frame_captured else self.latest_rgb
             
@@ -470,8 +474,12 @@ class SimpleSAMDetector(Node):
             response.stability_rate = 0.0
             response.error_message = str(e)
             self.get_logger().error(f"Detection error: {e}")
-            import traceback
-            self.get_logger().error(traceback.format_exc())
+
+        import traceback
+        self.get_logger().error(traceback.format_exc())
+        end = time.perf_counter()
+        latency = end - start
+        self.get_logger().info(f"Total detection latency: {latency:.6f} seconds")
         
         return response
 
