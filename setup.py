@@ -64,6 +64,8 @@ setup(
             'unified_pipeline = vision.unified_pipeline:main',
             'find_object_service = vision.find_object_service_node:main',
             'find_object_grasp_service = vision.find_object_grasp_service_node:main',
+            'test_scene_service = vision_scripts.test_scene_service:main',
+            'view_scene_understanding = vision_scripts.view_scene_understanding:main',
             # 'show_rgb_image = vision.show_rgb_image_node:main',
             # 'show_depth_image = vision.show_depth_image_node:main',
             # 'camera_service = vision.camera_service_node:main',

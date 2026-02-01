@@ -106,10 +106,10 @@ class SceneUnderstandingNode(Node):
         self.declare_parameter('real_hardware', False)
         self.real_hardware = bool(self.get_parameter('real_hardware').value)
 
-        self.rgb_topic = '/camera/color/image_raw' if self.real_hardware else '/camera/image_raw'
-        self.depth_topic = '/camera/depth/image_rect_raw' if self.real_hardware else '/camera/depth/image_raw'
-        self.camera_info_topic = 'camera/color/camera_info' if self.real_hardware else '/camera/camera_info'
-        self.desired_encoding = 'passthrough' if self.real_hardware else 'bgr8'
+        self.rgb_topic = '/camera/image_raw' if self.real_hardware else '/camera/image_raw'
+        self.depth_topic = '/camera/depth/image_raw' if self.real_hardware else '/camera/depth/image_raw'
+        self.camera_info_topic = '/camera/camera_info' if self.real_hardware else '/camera/camera_info'
+        self.desired_encoding = 'bgr8' if self.real_hardware else 'bgr8'
 
         # Create callback group for service calls
         self.callback_group = ReentrantCallbackGroup()
@@ -122,6 +122,7 @@ class SceneUnderstandingNode(Node):
         self.latest_rgb = None
         self.captured_frame = None
         self.frame_captured = False
+        self.waiting_for_scene_published = False # Add this flag
         
         # Output directory for saving visualizations
         self.output_dir = Path.home() / "scene_understanding_outputs"
@@ -202,6 +203,7 @@ class SceneUnderstandingNode(Node):
                 '/vision/scene_understanding',
                 self.detection_qos
             )
+            self.viz_pub = self.create_publisher(Image, '/vision/scene_understanding_viz', 10)
         
         # Visualization timer
         self.viz_timer = self.create_timer(0.033, self.visualization_callback)
@@ -231,6 +233,7 @@ class SceneUnderstandingNode(Node):
         """Handle RGB image messages for visualization"""
         try:
             self.latest_rgb = self.bridge.imgmsg_to_cv2(msg, desired_encoding=self.desired_encoding)
+            self.get_logger().debug("Received new RGB image for visualization.")
         except Exception as e:
             self.get_logger().error(f"Failed to convert RGB image: {e}")
     
@@ -924,33 +927,51 @@ class SceneUnderstandingNode(Node):
         self.get_logger().info(f"   Visualization saved: {vis_path}")
         
         # Update display
-        cv2.imshow(self.window_name, vis_image)
-        cv2.waitKey(1)
+        # cv2.imshow(self.window_name, vis_image)
+        # cv2.waitKey(1)
+        
+        # Publish visualization image
+        try:
+            vis_msg = self.bridge.cv2_to_imgmsg(vis_image, "bgr8")
+            self.viz_pub.publish(vis_msg)
+            self.get_logger().info("Published visualization image.")
+        except Exception as e:
+            self.get_logger().error(f"Failed to publish visualization image: {e}")
     
     def visualization_callback(self):
         """Display current scene understanding"""
+        self.get_logger().debug("Visualization callback triggered.")
         if self.latest_rgb is None:
+            self.get_logger().warn("No RGB image received yet, showing blank screen.")
             blank = np.zeros((480, 640, 3), dtype=np.uint8)
             cv2.putText(blank, "Waiting for camera image...", (100, 240),
                        cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2)
-            cv2.imshow(self.window_name, blank)
-            cv2.waitKey(1)
+            # We don't display here anymore, but we could publish a status image
             return
         
         if self.latest_scene is None:
-            display_img = self.latest_rgb.copy()
-            cv2.putText(display_img, "Call service to analyze scene", (10, 30),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
-            cv2.putText(display_img, "ros2 service call /vision/understand_scene std_srvs/srv/Trigger", (10, 60),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
-            cv2.putText(display_img, "-", (10, 90),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, (150, 255, 150), 1)
-            cv2.imshow(self.window_name, display_img)
-            cv2.waitKey(1)
+            if not self.waiting_for_scene_published:
+                self.get_logger().info("No scene analysis available yet. Publishing current RGB frame.")
+                self.waiting_for_scene_published = True
+            # Optionally publish the raw RGB image if no scene is ready
+            try:
+                display_img = self.latest_rgb.copy()
+                cv2.putText(display_img, "Call service to analyze scene", (10, 30),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+                viz_msg = self.bridge.cv2_to_imgmsg(display_img, "bgr8")
+                self.viz_pub.publish(viz_msg)
+            except Exception as e:
+                self.get_logger().error(f"Failed to publish raw visualization image: {e}")
             return
         
+        # Reset the flag once we have a scene
+        self.waiting_for_scene_published = False
+        
         # Display latest scene understanding
-        # TODO: Add visualization display logic here
+        self.get_logger().info("Have both RGB image and scene data, generating visualization.")
+        if self.latest_scene and self.latest_rgb is not None:
+            self._visualize_scene(self.latest_rgb, self.latest_scene)
+        # cv2.waitKey(1) # No longer needed here
     
     def destroy_node(self):
         """Cleanup on shutdown"""

@@ -165,13 +165,25 @@ class GraspNetDetector(Node):
             self.get_logger().warn("Continuing without visualization window")
 
         # Parameter toggles simulated vs hardware camera topics
-        self.declare_parameter('real_hardware', False)
-        self.real_hardware = bool(self.get_parameter('real_hardware').value)
+        self.declare_parameter('use_sim_time', True)
+        # self.real_hardware = self.get_parameter('use_sim_time').get_parameter_value().bool_value
+        self.real_hardware = False
 
-        self.rgb_topic = '/camera/color/image_raw' if self.real_hardware else '/camera/image_raw'
-        self.depth_topic = '/camera/depth/image_rect_raw' if self.real_hardware else '/camera/depth/image_raw'
-        self.camera_info_topic = 'camera/color/camera_info' if self.real_hardware else '/camera/camera_info'
-        self.desired_encoding = 'passthrough' if self.real_hardware else 'bgr8'
+        # Define topics based on whether we're in simulation or using real hardware
+        if self.real_hardware:
+            # self.rgb_topic = '/camera/color/image_raw'
+            # self.depth_topic = '/camera/depth/image_raw'
+            # self.camera_info_topic = '/camera/color/camera_info'
+            # self.depth_camera_info_topic = '/camera/depth/camera_info'
+            # self.desired_encoding = 'bgr8'
+            pass
+        else:
+            # Simulation topics
+            self.rgb_topic = '/camera/image_raw'
+            self.depth_topic = '/camera/depth/image_raw'
+            self.camera_info_topic = '/camera/camera_info'
+            self.depth_camera_info_topic = '/camera/depth/camera_info'
+            self.desired_encoding = 'bgr8'
         
         # QoS profiles
         self.image_qos = QoSProfile(
