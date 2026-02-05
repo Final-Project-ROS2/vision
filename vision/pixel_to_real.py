@@ -282,7 +282,9 @@ class PixelToRealServer(Node):
         # Depth is inversely related to z: smaller depth = further from ground = higher z
         # At table (z=0.8), we need to calibrate based on actual depth reading
         # If depth_reference is set, use it; otherwise estimate from depth
-        if self.depth_reference is not None:
+        if self.real_hardware:
+            z = depth_m  # Direct mapping for hardware
+        elif self.depth_reference is not None:
             # z = z_table + (depth_reference - depth)
             # When depth < depth_reference (closer to camera), z increases
             # When depth > depth_reference (further from camera), z decreases
@@ -306,6 +308,7 @@ class PixelToRealServer(Node):
         is at 0.8m from the camera, which should be the largest/most common depth value.
         """
         if self.latest_depth is None:
+            self.get_logger().warn('No depth image available, using default table depth 0.8m')
             return 0.8  # Default table depth
         
         depth = self.latest_depth
@@ -328,7 +331,12 @@ class PixelToRealServer(Node):
             return float(d)
 
         # Try direct bilinear interpolation first
-        d = bilinear(u, v)
+        if self.real_hardware:
+            d = self.latest_depth[int(v), int(u)]
+            self.get_logger().info(f'Read depth at ({u},{v}): {d:.3f}m (hardware mode)')
+        else:
+            d = bilinear(u, v)
+            self.get_logger().info(f'Read depth at ({u},{v}): {d if d is not None else "invalid"} (simulated mode)')
         if d is not None:
             return d
 
