@@ -792,7 +792,8 @@ class CLIPClassifier(Node):
             with torch.no_grad():
                 text_features = self.model.get_text_features(**text_inputs)
                 # Normalize text embedding
-                text_features = text_features / text_features.norm(dim=-1, keepdim=True)
+                import torch.nn.functional as F
+                text_features = F.normalize(text_features, p=2, dim=-1)
             
             # Compute image embeddings for each bounding box
             best_match = None
@@ -828,7 +829,8 @@ class CLIPClassifier(Node):
                 with torch.no_grad():
                     image_features = self.model.get_image_features(**image_inputs)
                     # Normalize image embedding
-                    image_features = image_features / image_features.norm(dim=-1, keepdim=True)
+                    import torch.nn.functional as F
+                    image_features = F.normalize(image_features, p=2, dim=-1)
                 
                 # Compute cosine similarity
                 similarity = (text_features @ image_features.T).item()

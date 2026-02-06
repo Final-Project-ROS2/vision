@@ -341,8 +341,8 @@ class SimpleSAMDetector(Node):
                     future = self.clip_filter_client.call_async(clip_request)
                     rclpy.spin_until_future_complete(self, future, timeout_sec=3.0)
                     
-                    if future.result() is not None:
-                        clip_response = future.result()
+                    clip_response = future.result()
+                    if clip_response is not None:
                         if clip_response.success:
                             # Parse JSON response
                             clip_data = json.loads(clip_response.message)
