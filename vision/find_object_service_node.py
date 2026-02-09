@@ -75,6 +75,18 @@ class FindObjectServiceNode(Node):
             detect_req = DetectObjects.Request()
             detect_response = self.detect_objects_client.call(detect_req)
             
+            if detect_response is None:
+                response.success = False
+                response.message = 'detect_objects service returned None (service might be unavailable)'
+                response.object_id = ''
+                response.bbox = []
+                response.confidence = 0.0
+                response.x = 0.0
+                response.y = 0.0
+                response.z = 0.0
+                self.get_logger().error('detect_objects returned None')
+                return response
+            
             if not detect_response.success:
                 response.success = False
                 response.message = f'detect_objects failed: {detect_response.error_message}'
@@ -93,6 +105,18 @@ class FindObjectServiceNode(Node):
             find_req = FindObject.Request()
             find_req.label = label
             find_response = self.find_object_client.call(find_req)
+            
+            if find_response is None:
+                response.success = False
+                response.message = 'find_object service returned None (service might be unavailable)'
+                response.object_id = ''
+                response.bbox = []
+                response.confidence = 0.0
+                response.x = 0.0
+                response.y = 0.0
+                response.z = 0.0
+                self.get_logger().error('find_object returned None')
+                return response
             
             if not find_response.success:
                 response.success = False
@@ -132,6 +156,18 @@ class FindObjectServiceNode(Node):
             pixel_req.u = u
             pixel_req.v = v
             pixel_response = self.pixel_to_real_client.call(pixel_req)
+            
+            if pixel_response is None:
+                response.success = False
+                response.message = 'pixel_to_real service returned None (service might be unavailable)'
+                response.object_id = object_id
+                response.bbox = find_response.bbox
+                response.confidence = find_response.confidence
+                response.x = 0.0
+                response.y = 0.0
+                response.z = 0.0
+                self.get_logger().error('pixel_to_real returned None')
+                return response
             
             # Step 5: Return final response
             response.success = True

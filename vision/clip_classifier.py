@@ -790,7 +790,9 @@ class CLIPClassifier(Node):
             ).to(self.device)
             
             with torch.no_grad():
-                text_features = self.model.get_text_features(**text_inputs)
+                # Use text_model directly to get embeddings
+                text_outputs = self.model.text_model(**text_inputs)
+                text_features = text_outputs.pooler_output
                 # Normalize text embedding
                 import torch.nn.functional as F
                 text_features = F.normalize(text_features, p=2, dim=-1)
@@ -827,7 +829,9 @@ class CLIPClassifier(Node):
                 ).to(self.device)
                 
                 with torch.no_grad():
-                    image_features = self.model.get_image_features(**image_inputs)
+                    # Use vision_model directly to get embeddings
+                    vision_outputs = self.model.vision_model(**image_inputs)
+                    image_features = vision_outputs.pooler_output
                     # Normalize image embedding
                     import torch.nn.functional as F
                     image_features = F.normalize(image_features, p=2, dim=-1)
