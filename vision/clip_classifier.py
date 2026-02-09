@@ -69,15 +69,15 @@ except ImportError:
     except ImportError:
         SAM_MSGS_AVAILABLE = False
 
-# Try to import CLIP/transformers
+# Try to import CLIP (OpenAI official implementation)
 try:
     import torch
     from PIL import Image as PILImage
-    from transformers import CLIPModel, AutoProcessor
+    import clip
     CLIP_AVAILABLE = True
 except ImportError:
     CLIP_AVAILABLE = False
-    print("CLIP not available. Install: pip install torch transformers pillow")
+    print("CLIP not available. Install: pip install git+https://github.com/openai/CLIP.git")
 
 # SAM messages availability (already checked in custom_interfaces import above)
 SAM_MSGS_AVAILABLE = CUSTOM_INTERFACES_AVAILABLE
@@ -177,7 +177,7 @@ class CLIPClassifier(Node):
         
         # CLIP model
         self.model = None
-        self.processor = None
+        self.preprocess = None
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         
         # QoS profile for image subscription
@@ -283,16 +283,14 @@ class CLIPClassifier(Node):
     def _init_clip_model(self):
         """Initialize CLIP model"""
         if not CLIP_AVAILABLE:
-            self.get_logger().error("CLIP not available! Install: pip install torch transformers pillow")
+            self.get_logger().error("CLIP not available! Install: pip install git+https://github.com/openai/CLIP.git")
             return
         
         try:
             self.get_logger().info("Loading CLIP model...")
-            model_name = "openai/clip-vit-base-patch32"
+            model_name = "ViT-B/32"  # OpenAI CLIP model name
             
-            self.model = CLIPModel.from_pretrained(model_name).to(self.device)
-            self.processor = AutoProcessor.from_pretrained(model_name)
-            
+            self.model, self.preprocess = clip.load(model_name, device=self.device)
             self.model.eval()  # Set to evaluation mode
             
             self.get_logger().info(f"CLIP model loaded successfully on {self.device}")
@@ -300,7 +298,7 @@ class CLIPClassifier(Node):
         except Exception as e:
             self.get_logger().error(f"Failed to load CLIP model: {e}")
             self.model = None
-            self.processor = None
+            self.preprocess = None
     
     def rgb_callback(self, msg: Image):
         """Handle incoming RGB images from configured RGB topic"""
@@ -782,22 +780,7 @@ class CLIPClassifier(Node):
             
             self.get_logger().info(f"Computing CLIP embeddings for '{target_label}' and {len(self.latest_region_classifications)} regions")
             
-            # Get text embedding for the target label
-            text_inputs = self.processor(
-                text=[target_label],
-                return_tensors="pt",
-                padding=True
-            ).to(self.device)
-            
-            with torch.no_grad():
-                # Use text_model directly to get embeddings
-                text_outputs = self.model.text_model(**text_inputs)
-                text_features = text_outputs.pooler_output
-                # Normalize text embedding
-                import torch.nn.functional as F
-                text_features = F.normalize(text_features, p=2, dim=-1)
-            
-            # Compute image embeddings for each bounding box
+            # Compute image-text similarity for each bounding box using CLIP's high-level API
             best_match = None
             best_similarity = -1.0  # Cosine similarity ranges from -1 to 1
             
@@ -822,22 +805,20 @@ class CLIPClassifier(Node):
                 region_rgb = cv2.cvtColor(region_bgr, cv2.COLOR_BGR2RGB)
                 pil_image = PILImage.fromarray(region_rgb)
                 
-                # Get image embedding
-                image_inputs = self.processor(
-                    images=pil_image,
-                    return_tensors="pt"
-                ).to(self.device)
+                # Use OpenAI CLIP for similarity computation
+                image_input = self.preprocess(pil_image).unsqueeze(0).to(self.device)
+                text_tokens = clip.tokenize([target_label]).to(self.device)
                 
                 with torch.no_grad():
-                    # Use vision_model directly to get embeddings
-                    vision_outputs = self.model.vision_model(**image_inputs)
-                    image_features = vision_outputs.pooler_output
-                    # Normalize image embedding
-                    import torch.nn.functional as F
-                    image_features = F.normalize(image_features, p=2, dim=-1)
-                
-                # Compute cosine similarity
-                similarity = (text_features @ image_features.T).item()
+                    image_features = self.model.encode_image(image_input)
+                    text_features = self.model.encode_text(text_tokens)
+                    
+                    # Normalize features
+                    image_features = image_features / image_features.norm(dim=-1, keepdim=True)
+                    text_features = text_features / text_features.norm(dim=-1, keepdim=True)
+                    
+                    # Compute cosine similarity (normalized dot product)
+                    similarity = (image_features @ text_features.T)[0, 0].item()
                 
                 self.get_logger().debug(f"Region {region['region_id']}: similarity = {similarity:.4f}")
                 
@@ -884,7 +865,7 @@ class CLIPClassifier(Node):
             response.message = f"Found '{target_label}' with similarity {best_match['confidence']:.3f}"
             response.bbox = best_match['bbox']
             response.confidence = float(best_match['confidence'])
-            response.object_id = str(best_match['region_id'])
+            # Note: FindObject.srv doesn't have object_id field (only FindObjectReal.srv does)
             
             self.get_logger().info(
                 f"Found '{target_label}': bbox={best_match['bbox']}, "
@@ -919,19 +900,22 @@ class CLIPClassifier(Node):
         rgb = cv2.cvtColor(rgb_image, cv2.COLOR_BGR2RGB)
         pil_image = PILImage.fromarray(rgb)
         
-        # Prepare inputs
-        inputs = self.processor(
-            text=self.candidate_labels,
-            images=pil_image,
-            return_tensors="pt",
-            padding=True
-        ).to(self.device)
+        # Prepare inputs using OpenAI CLIP
+        image_input = self.preprocess(pil_image).unsqueeze(0).to(self.device)
+        text_tokens = clip.tokenize(self.candidate_labels).to(self.device)
         
         # Get predictions
         with torch.no_grad():
-            outputs = self.model(**inputs)
-            logits_per_image = outputs.logits_per_image
-            probs = logits_per_image.softmax(dim=1)[0]
+            image_features = self.model.encode_image(image_input)
+            text_features = self.model.encode_text(text_tokens)
+            
+            # Normalize features
+            image_features = image_features / image_features.norm(dim=-1, keepdim=True)
+            text_features = text_features / text_features.norm(dim=-1, keepdim=True)
+            
+            # Calculate similarity (logits)
+            logits_per_image = (100.0 * image_features @ text_features.T)
+            probs = logits_per_image.softmax(dim=-1)[0]
         
         # Convert to numpy
         probs_np = probs.cpu().numpy()
@@ -1011,19 +995,22 @@ class CLIPClassifier(Node):
             region_rgb = cv2.cvtColor(region_bgr, cv2.COLOR_BGR2RGB)
             pil_image = PILImage.fromarray(region_rgb)
             
-            # Prepare inputs
-            inputs = self.processor(
-                text=self.candidate_labels,
-                images=pil_image,
-                return_tensors="pt",
-                padding=True
-            ).to(self.device)
+            # Prepare inputs using OpenAI CLIP
+            image_input = self.preprocess(pil_image).unsqueeze(0).to(self.device)
+            text_tokens = clip.tokenize(self.candidate_labels).to(self.device)
             
             # Get predictions
             with torch.no_grad():
-                outputs = self.model(**inputs)
-                logits_per_image = outputs.logits_per_image
-                probs = logits_per_image.softmax(dim=1)[0]
+                image_features = self.model.encode_image(image_input)
+                text_features = self.model.encode_text(text_tokens)
+                
+                # Normalize features
+                image_features = image_features / image_features.norm(dim=-1, keepdim=True)
+                text_features = text_features / text_features.norm(dim=-1, keepdim=True)
+                
+                # Calculate similarity (logits)
+                logits_per_image = (100.0 * image_features @ text_features.T)
+                probs = logits_per_image.softmax(dim=-1)[0]
             
             # Convert to numpy
             probs_np = probs.cpu().numpy()
@@ -1243,7 +1230,7 @@ class CLIPClassifier(Node):
             
             # Prepare label text
             label = f"FOUND: {found['label']}"
-            conf = f"Conf: {found['confidence']:.1%}"
+            conf = f"Conf: {found['confidence']:.2f}"
             
             # Calculate label position (above bbox)
             label_size, _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.9, 2)

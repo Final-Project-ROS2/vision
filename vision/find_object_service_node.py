@@ -7,6 +7,16 @@ from rclpy.executors import MultiThreadedExecutor
 from custom_interfaces.srv import DetectObjects, FindObject, PixelToReal, FindObjectReal
 
 
+
+"""
+ros2 service call /find_object custom_interfaces/srv/FindObjectReal "{label: 'bowl'}"
+
+confidence calculate by SAM detection based
+"""
+
+
+
+
 class FindObjectServiceNode(Node):
     def __init__(self):
         super().__init__('find_object_service_node')
