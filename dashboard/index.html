@@ -1,0 +1,747 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Vision Benchmark Dashboard</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            padding: 20px;
+            min-height: 100vh;
+        }
+
+        .container {
+            max-width: 1800px;
+            margin: 0 auto;
+        }
+
+        header {
+            background: white;
+            padding: 30px;
+            border-radius: 15px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+            margin-bottom: 30px;
+            text-align: center;
+        }
+
+        h1 {
+            color: #667eea;
+            font-size: 2.5em;
+            margin-bottom: 10px;
+        }
+
+        .subtitle {
+            color: #666;
+            font-size: 1.1em;
+        }
+
+        .stats-bar {
+            display: flex;
+            gap: 20px;
+            margin-bottom: 30px;
+            flex-wrap: wrap;
+        }
+
+        .stat-card {
+            flex: 1;
+            min-width: 200px;
+            background: white;
+            padding: 20px;
+            border-radius: 10px;
+            box-shadow: 0 5px 15px rgba(0,0,0,0.1);
+            text-align: center;
+        }
+
+        .stat-number {
+            font-size: 2.5em;
+            font-weight: bold;
+            color: #667eea;
+            margin-bottom: 5px;
+        }
+
+        .stat-label {
+            color: #666;
+            font-size: 0.9em;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .section {
+            background: white;
+            padding: 30px;
+            border-radius: 15px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+            margin-bottom: 30px;
+        }
+
+        .section-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+            padding-bottom: 15px;
+            border-bottom: 3px solid #667eea;
+        }
+
+        h2 {
+            color: #333;
+            font-size: 1.8em;
+        }
+
+        .badge {
+            background: #667eea;
+            color: white;
+            padding: 8px 20px;
+            border-radius: 20px;
+            font-size: 0.9em;
+            font-weight: bold;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 15px;
+        }
+
+        th {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 15px;
+            text-align: left;
+            font-weight: 600;
+            text-transform: uppercase;
+            font-size: 0.85em;
+            letter-spacing: 0.5px;
+        }
+
+        td {
+            padding: 12px 15px;
+            border-bottom: 1px solid #e0e0e0;
+            color: #333;
+        }
+
+        tr:hover {
+            background: #f5f5f5;
+        }
+
+        .no-data {
+            text-align: center;
+            padding: 40px;
+            color: #999;
+            font-style: italic;
+        }
+
+        .success {
+            color: #4CAF50;
+            font-weight: bold;
+        }
+
+        .failure {
+            color: #f44336;
+            font-weight: bold;
+        }
+
+        .confidence-high {
+            color: #4CAF50;
+            font-weight: bold;
+        }
+
+        .confidence-medium {
+            color: #FF9800;
+            font-weight: bold;
+        }
+
+        .confidence-low {
+            color: #f44336;
+            font-weight: bold;
+        }
+
+        .timestamp {
+            color: #999;
+            font-size: 0.85em;
+        }
+
+        .controls {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+
+        button {
+            background: #667eea;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 0.9em;
+            transition: all 0.3s;
+        }
+
+        button:hover {
+            background: #764ba2;
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(0,0,0,0.2);
+        }
+
+        .auto-refresh {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            color: white;
+            background: rgba(255,255,255,0.2);
+            padding: 10px 15px;
+            border-radius: 5px;
+        }
+
+        .indicator {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            background: #4CAF50;
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        .bbox-coords {
+            font-family: 'Courier New', monospace;
+            font-size: 0.9em;
+            color: #666;
+        }
+
+        .metric-bar {
+            display: flex;
+            gap: 15px;
+            margin-top: 15px;
+            padding: 15px;
+            background: #f8f9fa;
+            border-radius: 8px;
+        }
+
+        .metric-item {
+            flex: 1;
+            text-align: center;
+        }
+
+        .metric-value {
+            font-size: 1.5em;
+            font-weight: bold;
+            color: #667eea;
+        }
+
+        .metric-label {
+            font-size: 0.85em;
+            color: #666;
+            margin-top: 5px;
+        }
+
+        .scroll-table {
+            max-height: 500px;
+            overflow-y: auto;
+            border: 1px solid #e0e0e0;
+            border-radius: 8px;
+        }
+
+        .scroll-table::-webkit-scrollbar {
+            width: 10px;
+        }
+
+        .scroll-table::-webkit-scrollbar-track {
+            background: #f1f1f1;
+            border-radius: 10px;
+        }
+
+        .scroll-table::-webkit-scrollbar-thumb {
+            background: #667eea;
+            border-radius: 10px;
+        }
+
+        .scroll-table::-webkit-scrollbar-thumb:hover {
+            background: #764ba2;
+        }
+
+        .relation-text {
+            font-style: italic;
+            color: #555;
+        }
+
+        .object-label {
+            display: inline-block;
+            background: #e3f2fd;
+            padding: 4px 10px;
+            border-radius: 12px;
+            font-size: 0.9em;
+            font-weight: 500;
+            color: #1976d2;
+            margin: 2px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🎯 Vision Benchmark Dashboard</h1>
+            <p class="subtitle">Real-time monitoring of ROS2 Vision Pipeline Services</p>
+        </header>
+
+        <div class="auto-refresh">
+            <div class="indicator"></div>
+            <span>Auto-refreshing every 2 seconds</span>
+            <button onclick="clearData()" style="margin-left: auto;">Clear All Data</button>
+        </div>
+
+        <div class="stats-bar">
+            <div class="stat-card">
+                <div class="stat-number" id="totalCalls">0</div>
+                <div class="stat-label">Total Service Calls</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-number" id="pixelCount">0</div>
+                <div class="stat-label">Pixel to Real</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-number" id="samCount">0</div>
+                <div class="stat-label">SAM Detections</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-number" id="clipCount">0</div>
+                <div class="stat-label">CLIP Classifications</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-number" id="graspCount">0</div>
+                <div class="stat-label">Grasp Detections</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-number" id="sceneCount">0</div>
+                <div class="stat-label">Scene Analysis</div>
+            </div>
+        </div>
+
+        <!-- Pixel to Real Section -->
+        <div class="section">
+            <div class="section-header">
+                <h2>📍 Pixel to Real Conversion</h2>
+                <span class="badge" id="pixelBadge">0 Records</span>
+            </div>
+            <div class="scroll-table">
+                <table id="pixelTable">
+                    <thead>
+                        <tr>
+                            <th>Test ID</th>
+                            <th>Timestamp</th>
+                            <th>Input U (px)</th>
+                            <th>Input V (px)</th>
+                            <th>Output X (m)</th>
+                            <th>Output Y (m)</th>
+                            <th>Output Z (m)</th>
+                        </tr>
+                    </thead>
+                    <tbody id="pixelBody">
+                        <tr><td colspan="7" class="no-data">No data available</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- SAM Detections Section -->
+        <div class="section">
+            <div class="section-header">
+                <h2>🎯 SAM Object Detection</h2>
+                <span class="badge" id="samBadge">0 Records</span>
+            </div>
+            <div class="metric-bar">
+                <div class="metric-item">
+                    <div class="metric-value" id="samAvgIoU">0.00</div>
+                    <div class="metric-label">Avg IoU</div>
+                </div>
+                <div class="metric-item">
+                    <div class="metric-value" id="samStableRate">0%</div>
+                    <div class="metric-label">Stability Rate</div>
+                </div>
+                <div class="metric-item">
+                    <div class="metric-value" id="samAvgConf">0.00</div>
+                    <div class="metric-label">Avg Confidence</div>
+                </div>
+            </div>
+            <div class="scroll-table">
+                <table id="samTable">
+                    <thead>
+                        <tr>
+                            <th>Object ID</th>
+                            <th>Bounding Box</th>
+                            <th>Center Point</th>
+                            <th>Confidence</th>
+                            <th>IoU Score</th>
+                            <th>AP (IoU≥0.5)</th>
+                            <th>Distance (cm)</th>
+                            <th>Timestamp</th>
+                        </tr>
+                    </thead>
+                    <tbody id="samBody">
+                        <tr><td colspan="8" class="no-data">No data available</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- CLIP Classifications Section -->
+        <div class="section">
+            <div class="section-header">
+                <h2>🏷️ CLIP Classification</h2>
+                <span class="badge" id="clipBadge">0 Records</span>
+            </div>
+            <div class="metric-bar">
+                <div class="metric-item">
+                    <div class="metric-value" id="clipTop1">N/A</div>
+                    <div class="metric-label">Top-1 Accuracy</div>
+                </div>
+                <div class="metric-item">
+                    <div class="metric-value" id="clipAvgConf">0.00</div>
+                    <div class="metric-label">Avg Confidence</div>
+                </div>
+            </div>
+            <div class="scroll-table">
+                <table id="clipTable">
+                    <thead>
+                        <tr>
+                            <th>Test ID</th>
+                            <th>Label</th>
+                            <th>Confidence</th>
+                            <th>Top-1 Accuracy</th>
+                            <th>Bounding Box</th>
+                            <th>Timestamp</th>
+                        </tr>
+                    </thead>
+                    <tbody id="clipBody">
+                        <tr><td colspan="6" class="no-data">No data available</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- GraspNet Section -->
+        <div class="section">
+            <div class="section-header">
+                <h2>🤖 Grasp Detection</h2>
+                <span class="badge" id="graspBadge">0 Records</span>
+            </div>
+            <div class="metric-bar">
+                <div class="metric-item">
+                    <div class="metric-value" id="graspAvgQuality">0.00</div>
+                    <div class="metric-label">Avg Quality Score</div>
+                </div>
+                <div class="metric-item">
+                    <div class="metric-value" id="graspAvgWidth">0.00m</div>
+                    <div class="metric-label">Avg Grasp Width</div>
+                </div>
+            </div>
+            <div class="scroll-table">
+                <table id="graspTable">
+                    <thead>
+                        <tr>
+                            <th>Test ID</th>
+                            <th>Object ID</th>
+                            <th>Position (u,v)</th>
+                            <th>Position (x,y,z)</th>
+                            <th>Quality Score</th>
+                            <th>Grasp Width</th>
+                            <th>Approach</th>
+                            <th>Timestamp</th>
+                        </tr>
+                    </thead>
+                    <tbody id="graspBody">
+                        <tr><td colspan="8" class="no-data">No data available</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- Scene Understanding Section -->
+        <div class="section">
+            <div class="section-header">
+                <h2>🌐 Scene Understanding</h2>
+                <span class="badge" id="sceneBadge">0 Records</span>
+            </div>
+            <div class="metric-bar">
+                <div class="metric-item">
+                    <div class="metric-value" id="sceneObjects">0</div>
+                    <div class="metric-label">Total Objects</div>
+                </div>
+                <div class="metric-item">
+                    <div class="metric-value" id="sceneRelations">0</div>
+                    <div class="metric-label">Relations</div>
+                </div>
+                <div class="metric-item">
+                    <div class="metric-value" id="sceneSpatialAcc">0%</div>
+                    <div class="metric-label">Spatial Accuracy</div>
+                </div>
+                <div class="metric-item">
+                    <div class="metric-value" id="sceneAdjacencyAcc">0%</div>
+                    <div class="metric-label">Adjacency Accuracy</div>
+                </div>
+            </div>
+            <div class="scroll-table">
+                <table id="sceneTable">
+                    <thead>
+                        <tr>
+                            <th>Scene ID</th>
+                            <th>Objects</th>
+                            <th>Relations</th>
+                            <th>Description</th>
+                            <th>Spatial Acc</th>
+                            <th>Adjacency Acc</th>
+                            <th>Timestamp</th>
+                        </tr>
+                    </thead>
+                    <tbody id="sceneBody">
+                        <tr><td colspan="7" class="no-data">No data available</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let lastData = null;
+
+        async function fetchData() {
+            try {
+                const response = await fetch('/api/data');
+                const data = await response.json();
+                lastData = data;
+                updateDashboard(data);
+            } catch (error) {
+                console.error('Error fetching data:', error);
+            }
+        }
+
+        function updateDashboard(data) {
+            // Update stats
+            document.getElementById('totalCalls').textContent = data.metadata.total_calls;
+            document.getElementById('pixelCount').textContent = data.pixel_to_real.length;
+            document.getElementById('samCount').textContent = data.sam_detections.length;
+            document.getElementById('clipCount').textContent = data.clip_classifications.length;
+            document.getElementById('graspCount').textContent = data.grasp_detections.length;
+            document.getElementById('sceneCount').textContent = data.scene_understanding.length;
+
+            // Update Pixel to Real
+            updatePixelToReal(data.pixel_to_real);
+
+            // Update SAM Detections
+            updateSAMDetections(data.sam_detections);
+
+            // Update CLIP Classifications
+            updateCLIPClassifications(data.clip_classifications);
+
+            // Update Grasp Detections
+            updateGraspDetections(data.grasp_detections);
+
+            // Update Scene Understanding
+            updateSceneUnderstanding(data.scene_understanding);
+        }
+
+        function updatePixelToReal(records) {
+            document.getElementById('pixelBadge').textContent = `${records.length} Records`;
+            const tbody = document.getElementById('pixelBody');
+            
+            if (records.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="7" class="no-data">No data available</td></tr>';
+                return;
+            }
+
+            tbody.innerHTML = records.slice(-50).reverse().map(record => `
+                <tr>
+                    <td>${record.test_id}</td>
+                    <td class="timestamp">${formatTimestamp(record.timestamp)}</td>
+                    <td>${record.input.u}</td>
+                    <td>${record.input.v}</td>
+                    <td>${record.output.x.toFixed(3)}</td>
+                    <td>${record.output.y.toFixed(3)}</td>
+                    <td>${record.output.z.toFixed(3)}</td>
+                </tr>
+            `).join('');
+        }
+
+        function updateSAMDetections(records) {
+            document.getElementById('samBadge').textContent = `${records.length} Records`;
+            const tbody = document.getElementById('samBody');
+            
+            if (records.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="8" class="no-data">No data available</td></tr>';
+                document.getElementById('samAvgIoU').textContent = '0.00';
+                document.getElementById('samStableRate').textContent = '0%';
+                document.getElementById('samAvgConf').textContent = '0.00';
+                return;
+            }
+
+            // Calculate metrics
+            const avgIoU = records.reduce((sum, r) => sum + r.iou_score, 0) / records.length;
+            const stableCount = records.filter(r => r.is_stable).length;
+            const stableRate = (stableCount / records.length * 100).toFixed(0);
+            const avgConf = records.reduce((sum, r) => sum + r.confidence, 0) / records.length;
+
+            document.getElementById('samAvgIoU').textContent = avgIoU.toFixed(2);
+            document.getElementById('samStableRate').textContent = `${stableRate}%`;
+            document.getElementById('samAvgConf').textContent = avgConf.toFixed(2);
+
+            tbody.innerHTML = records.slice(-50).reverse().map(record => `
+                <tr>
+                    <td>${record.obj_id}</td>
+                    <td class="bbox-coords">(${record.bbox.x1}, ${record.bbox.y1}, ${record.bbox.x2}, ${record.bbox.y2})</td>
+                    <td class="bbox-coords">(${record.center.u}, ${record.center.v})</td>
+                    <td class="${getConfidenceClass(record.confidence)}">${record.confidence.toFixed(2)}</td>
+                    <td class="${getConfidenceClass(record.iou_score)}">${record.iou_score.toFixed(2)}</td>
+                    <td class="${record.is_stable ? 'success' : 'failure'}">${record.is_stable ? '✓ Pass' : '✗ Fail'}</td>
+                    <td>${record.distance_cm.toFixed(1)}</td>
+                    <td class="timestamp">${formatTimestamp(record.timestamp)}</td>
+                </tr>
+            `).join('');
+        }
+
+        function updateCLIPClassifications(records) {
+            document.getElementById('clipBadge').textContent = `${records.length} Records`;
+            const tbody = document.getElementById('clipBody');
+            
+            if (records.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="6" class="no-data">No data available</td></tr>';
+                document.getElementById('clipTop1').textContent = 'N/A';
+                document.getElementById('clipAvgConf').textContent = '0.00';
+                return;
+            }
+
+            // Calculate metrics
+            const withAccuracy = records.filter(r => r.top1_accuracy !== null);
+            const correctCount = withAccuracy.filter(r => r.top1_accuracy === true).length;
+            const top1Acc = withAccuracy.length > 0 ? (correctCount / withAccuracy.length * 100).toFixed(1) + '%' : 'N/A';
+            const avgConf = records.reduce((sum, r) => sum + r.confidence, 0) / records.length;
+
+            document.getElementById('clipTop1').textContent = top1Acc;
+            document.getElementById('clipAvgConf').textContent = avgConf.toFixed(2);
+
+            tbody.innerHTML = records.slice(-50).reverse().map(record => `
+                <tr>
+                    <td>${record.test_id}</td>
+                    <td><span class="object-label">${record.label}</span></td>
+                    <td class="${getConfidenceClass(record.confidence)}">${record.confidence.toFixed(2)}</td>
+                    <td>${formatAccuracy(record.top1_accuracy)}</td>
+                    <td class="bbox-coords">${JSON.stringify(record.bbox)}</td>
+                    <td class="timestamp">${formatTimestamp(record.timestamp)}</td>
+                </tr>
+            `).join('');
+        }
+
+        function updateGraspDetections(records) {
+            document.getElementById('graspBadge').textContent = `${records.length} Records`;
+            const tbody = document.getElementById('graspBody');
+            
+            if (records.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="8" class="no-data">No data available</td></tr>';
+                document.getElementById('graspAvgQuality').textContent = '0.00';
+                document.getElementById('graspAvgWidth').textContent = '0.00m';
+                return;
+            }
+
+            // Calculate metrics
+            const avgQuality = records.reduce((sum, r) => sum + r.quality_score, 0) / records.length;
+            const avgWidth = records.reduce((sum, r) => sum + r.grasp_width, 0) / records.length;
+
+            document.getElementById('graspAvgQuality').textContent = avgQuality.toFixed(2);
+            document.getElementById('graspAvgWidth').textContent = avgWidth.toFixed(3) + 'm';
+
+            tbody.innerHTML = records.slice(-50).reverse().map(record => `
+                <tr>
+                    <td>${record.test_id}</td>
+                    <td>${record.object_id}</td>
+                    <td class="bbox-coords">(${record.pixel_position.u}, ${record.pixel_position.v})</td>
+                    <td class="bbox-coords">(${record.world_position.x.toFixed(3)}, ${record.world_position.y.toFixed(3)}, ${record.world_position.z.toFixed(3)})</td>
+                    <td class="${getConfidenceClass(record.quality_score)}">${record.quality_score.toFixed(2)}</td>
+                    <td>${record.grasp_width.toFixed(3)}m</td>
+                    <td>${record.approach_direction}</td>
+                    <td class="timestamp">${formatTimestamp(record.timestamp)}</td>
+                </tr>
+            `).join('');
+        }
+
+        function updateSceneUnderstanding(records) {
+            document.getElementById('sceneBadge').textContent = `${records.length} Records`;
+            const tbody = document.getElementById('sceneBody');
+            
+            if (records.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="7" class="no-data">No data available</td></tr>';
+                document.getElementById('sceneObjects').textContent = '0';
+                document.getElementById('sceneRelations').textContent = '0';
+                document.getElementById('sceneSpatialAcc').textContent = '0%';
+                document.getElementById('sceneAdjacencyAcc').textContent = '0%';
+                return;
+            }
+
+            // Get latest scene metrics
+            const latest = records[records.length - 1];
+            document.getElementById('sceneObjects').textContent = latest.total_objects;
+            document.getElementById('sceneRelations').textContent = latest.relations.length;
+            document.getElementById('sceneSpatialAcc').textContent = latest.spatial_accuracy.toFixed(0) + '%';
+            document.getElementById('sceneAdjacencyAcc').textContent = latest.adjacency_accuracy.toFixed(0) + '%';
+
+            tbody.innerHTML = records.slice(-20).reverse().map(record => `
+                <tr>
+                    <td>${record.scene_id}</td>
+                    <td>${record.object_labels.map(l => `<span class="object-label">${l}</span>`).join(' ')}</td>
+                    <td>
+                        <div style="max-height: 100px; overflow-y: auto; font-size: 0.85em;">
+                            ${record.relations.map(r => 
+                                `<div class="relation-text">${r.subject} ${r.relation} ${r.object} (${(r.confidence * 100).toFixed(0)}%)</div>`
+                            ).join('')}
+                        </div>
+                    </td>
+                    <td style="max-width: 300px; font-size: 0.85em;">${record.scene_description}</td>
+                    <td class="${getConfidenceClass(record.spatial_accuracy / 100)}">${record.spatial_accuracy.toFixed(0)}%</td>
+                    <td class="${getConfidenceClass(record.adjacency_accuracy / 100)}">${record.adjacency_accuracy.toFixed(0)}%</td>
+                    <td class="timestamp">${formatTimestamp(record.timestamp)}</td>
+                </tr>
+            `).join('');
+        }
+
+        function getConfidenceClass(value) {
+            if (value >= 0.7) return 'confidence-high';
+            if (value >= 0.4) return 'confidence-medium';
+            return 'confidence-low';
+        }
+
+        function formatAccuracy(value) {
+            if (value === null) return '<span style="color: #999;">N/A</span>';
+            if (value === true) return '<span class="success">✓ True</span>';
+            return '<span class="failure">✗ False</span>';
+        }
+
+        function formatTimestamp(timestamp) {
+            const date = new Date(timestamp);
+            return date.toLocaleTimeString();
+        }
+
+        async function clearData() {
+            if (confirm('Are you sure you want to clear all benchmark data?')) {
+                // This would require a service call - for now just notify user
+                alert('To clear data, run: ros2 service call /benchmark/clear_data std_srvs/srv/Trigger');
+            }
+        }
+
+        // Auto-refresh every 2 seconds
+        setInterval(fetchData, 2000);
+        
+        // Initial fetch
+        fetchData();
+    </script>
+</body>
+</html>

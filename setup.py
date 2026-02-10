@@ -23,7 +23,10 @@ setup(
             glob('config/*.rviz') + glob('config/*.yaml') + glob('config/*.json')),
         # Include message files
         (os.path.join('share', package_name, 'msg'), 
-            glob('msg/*.msg')), 
+            glob('msg/*.msg')),
+        # Include dashboard files
+        (os.path.join('share', package_name, 'dashboard'), 
+            glob('dashboard/*.html') + glob('dashboard/*.css') + glob('dashboard/*.js')),
         # Include DINO pipeline components
         (os.path.join('share', package_name, 'Final-proj'), 
             glob('Final-proj/**/*.py', recursive=True)),
@@ -64,6 +67,7 @@ setup(
             'unified_pipeline = vision.unified_pipeline:main',
             'find_object_service = vision.find_object_service_node:main',
             'find_object_grasp_service = vision.find_object_grasp_service_node:main',
+            # 'benchmark_dashboard = vision.benchmark_dashboard:main',
             # 'show_rgb_image = vision.show_rgb_image_node:main',
             # 'show_depth_image = vision.show_depth_image_node:main',
             # 'camera_service = vision.camera_service_node:main',
