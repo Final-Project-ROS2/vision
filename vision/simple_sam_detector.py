@@ -42,6 +42,7 @@ import json
 import os
 from datetime import datetime
 from typing import List, Dict, Tuple
+import pyrealsense2 as rs
 
 
 class SimpleSAMDetector(Node):
@@ -53,10 +54,46 @@ class SimpleSAMDetector(Node):
         self.declare_parameter('real_hardware', False)
         self.real_hardware = bool(self.get_parameter('real_hardware').value)
 
+        # RealSense-specific variables for hardware mode
+        self.rs_pipeline = None
+        self.rs_align = None
+        self.rs_intrinsics = None
         self.rgb_topic = '/camera/color/image_raw' if self.real_hardware else '/camera/image_raw'
         self.depth_topic = '/camera/depth/image_rect_raw' if self.real_hardware else '/camera/depth/image_raw'
         self.camera_info_topic = 'camera/color/camera_info' if self.real_hardware else '/camera/camera_info'
-        self.desired_encoding = 'passthrough' if self.real_hardware else 'bgr8'
+
+        if self.real_hardware:
+            self.rgb_topic = '/camera/color/image_raw'
+            self.depth_topic = '/camera/depth/image_rect_raw'
+            self.camera_info_topic = 'camera/color/camera_info'
+            self.desired_encoding = 'passthrough'
+            
+            # Initialize RealSense pipeline for direct SDK access
+            try:
+                self.rs_pipeline = rs.pipeline()
+                config = rs.config()
+                config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 30)
+                config.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
+                profile = self.rs_pipeline.start(config)
+                
+                # Create align object to align depth to color
+                self.rs_align = rs.align(rs.stream.color)
+                
+                # Get intrinsics from color stream
+                color_profile = profile.get_stream(rs.stream.color)
+                self.rs_intrinsics = color_profile.as_video_stream_profile().intrinsics
+                
+                self.get_logger().info('RealSense pipeline initialized successfully')
+                self.get_logger().info(f'Color intrinsics: fx={self.rs_intrinsics.fx}, fy={self.rs_intrinsics.fy}, ppx={self.rs_intrinsics.ppx}, ppy={self.rs_intrinsics.ppy}')
+            except Exception as e:
+                self.get_logger().error(f'Failed to initialize RealSense pipeline: {e}')
+                self.get_logger().warn('Falling back to topic-based depth reading')
+                self.rs_pipeline = None
+        else:
+            self.rgb_topic = '/camera/image_raw'
+            self.depth_topic = '/camera/depth/image_raw'
+            self.camera_info_topic = '/camera/camera_info'
+            self.desired_encoding = 'bgr8'
         
         # Mode configuration - Default to single shot for faster service response
         self.single_shot_mode = True  # Force single shot mode for service efficiency
@@ -183,10 +220,12 @@ class SimpleSAMDetector(Node):
             self.latest_rgb = self.bridge.imgmsg_to_cv2(msg, desired_encoding=self.desired_encoding)
             self.frame_counter += 1
             
+            # Always update captured frame to get fresh data for detection
+            # (Fixed: was only capturing first frame, now updates continuously)
+            self.captured_frame = self.latest_rgb.copy()
             if not self.frame_captured:
-                self.captured_frame = self.latest_rgb.copy()
                 self.frame_captured = True
-                self.get_logger().info(f"Captured frame {self.frame_counter} for detection")
+                self.get_logger().info(f"First frame captured from {self.rgb_topic}")
             
             # In continuous mode, detect on every frame (disabled by default now)
             if self.continuous_detection:
@@ -314,6 +353,9 @@ class SimpleSAMDetector(Node):
             
             self.get_logger().info("=" * 80)
             self.get_logger().info("Running SAM detection and CLIP classification...")
+            self.get_logger().info(f"Frame captured: {self.frame_captured}")
+            self.get_logger().info(f"Frame shape: {frame_to_use.shape if frame_to_use is not None else 'None'}")
+            self.get_logger().info(f"Using {'captured_frame' if self.frame_captured else 'latest_rgb'}")
             self.get_logger().info("=" * 80)
             
             # Step 1: Run SAM detection on captured frame
@@ -583,6 +625,7 @@ class SimpleSAMDetector(Node):
     def _detect_objects(self, rgb_image: np.ndarray) -> List[Dict]:
         """
         Detect objects using OpenCV contour detection (SAM-style segmentation)
+        with multiple fallback methods for robustness
         
         Args:
             rgb_image: BGR image from OpenCV
@@ -591,9 +634,11 @@ class SimpleSAMDetector(Node):
             List of detection dictionaries with bbox, mask, confidence
         """
         if rgb_image is None:
+            self.get_logger().warn("Detection called with None image")
             return []
         
         h, w = rgb_image.shape[:2]
+        self.get_logger().info(f"Detecting objects in image: {w}x{h}")
         
         # Convert to grayscale
         gray = cv2.cvtColor(rgb_image, cv2.COLOR_BGR2GRAY)
@@ -601,30 +646,62 @@ class SimpleSAMDetector(Node):
         # Apply Gaussian blur to reduce noise
         blurred = cv2.GaussianBlur(gray, (5, 5), 0)
         
-        # Adaptive thresholding for better object separation
-        thresh = cv2.adaptiveThreshold(
-            blurred, 255, 
-            cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-            cv2.THRESH_BINARY_INV, 
-            11, 2
-        )
+        # Try multiple detection methods for robustness
+        all_contours = []
         
-        # Morphological operations to clean up
-        kernel = np.ones((3, 3), np.uint8)
-        thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel, iterations=2)
-        thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel, iterations=1)
+        # Method 1: Adaptive thresholding
+        try:
+            thresh_adaptive = cv2.adaptiveThreshold(
+                blurred, 255, 
+                cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                cv2.THRESH_BINARY_INV, 
+                11, 2
+            )
+            kernel = np.ones((3, 3), np.uint8)
+            thresh_adaptive = cv2.morphologyEx(thresh_adaptive, cv2.MORPH_CLOSE, kernel, iterations=2)
+            thresh_adaptive = cv2.morphologyEx(thresh_adaptive, cv2.MORPH_OPEN, kernel, iterations=1)
+            contours_adaptive, _ = cv2.findContours(thresh_adaptive, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            all_contours.extend(contours_adaptive)
+            self.get_logger().info(f"Adaptive threshold found {len(contours_adaptive)} contours")
+        except Exception as e:
+            self.get_logger().warn(f"Adaptive threshold failed: {e}")
         
-        # Find contours (external only)
-        contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        # Method 2: Otsu's thresholding (works better for bimodal images)
+        try:
+            _, thresh_otsu = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+            kernel = np.ones((3, 3), np.uint8)
+            thresh_otsu = cv2.morphologyEx(thresh_otsu, cv2.MORPH_CLOSE, kernel, iterations=2)
+            contours_otsu, _ = cv2.findContours(thresh_otsu, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            all_contours.extend(contours_otsu)
+            self.get_logger().info(f"Otsu threshold found {len(contours_otsu)} contours")
+        except Exception as e:
+            self.get_logger().warn(f"Otsu threshold failed: {e}")
         
-        # Filter parameters
-        min_area = (w * h) * 0.001  # Minimum 0.1% of image
-        max_area = (w * h) * 0.8    # Maximum 80% of image
-        min_box_size = 20           # Minimum bounding box dimension
+        # Method 3: Canny edge detection (catches edges/boundaries)
+        try:
+            edges = cv2.Canny(blurred, 50, 150)
+            kernel = np.ones((5, 5), np.uint8)
+            edges_dilated = cv2.dilate(edges, kernel, iterations=2)
+            contours_canny, _ = cv2.findContours(edges_dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            all_contours.extend(contours_canny)
+            self.get_logger().info(f"Canny edge detection found {len(contours_canny)} contours")
+        except Exception as e:
+            self.get_logger().warn(f"Canny edge detection failed: {e}")
+        
+        self.get_logger().info(f"Total contours from all methods: {len(all_contours)}")
+        
+        # Relaxed filter parameters (was too strict before)
+        min_area = (w * h) * 0.0005  # Reduced from 0.001 (0.05% instead of 0.1%)
+        max_area = (w * h) * 0.9     # Increased from 0.8 (90% instead of 80%)
+        min_box_size = 15            # Reduced from 20 to catch smaller objects
         
         detections = []
+        seen_boxes = []  # Track similar boxes to avoid duplicates
         
-        for i, contour in enumerate(contours):
+        detections = []
+        seen_boxes = []  # Track similar boxes to avoid duplicates
+        
+        for i, contour in enumerate(all_contours):
             area = cv2.contourArea(contour)
             
             # Filter by area
@@ -638,6 +715,20 @@ class SimpleSAMDetector(Node):
             if w_box < min_box_size or h_box < min_box_size:
                 continue
             
+            # Check for duplicate/overlapping detections (IoU > 0.7 with existing)
+            bbox_new = [x, y, x + w_box, y + h_box]
+            is_duplicate = False
+            for seen_bbox in seen_boxes:
+                iou = self._calculate_iou(bbox_new, seen_bbox)
+                if iou > 0.7:  # High overlap = duplicate
+                    is_duplicate = True
+                    break
+            
+            if is_duplicate:
+                continue
+            
+            seen_boxes.append(bbox_new)
+            
             # Create binary mask for this object
             mask = np.zeros((h, w), dtype=np.uint8)
             cv2.drawContours(mask, [contour], -1, 255, -1)
@@ -645,25 +736,75 @@ class SimpleSAMDetector(Node):
             # Calculate confidence based on contour properties
             perimeter = cv2.arcLength(contour, True)
             circularity = 4 * np.pi * area / (perimeter * perimeter) if perimeter > 0 else 0
-            confidence = min(0.95, 0.60 + circularity * 0.35)
+            confidence = min(0.95, 0.50 + circularity * 0.45)  # More lenient baseline
             
-            # Filter by confidence threshold (only keep detections > 0.4)
-            if confidence <= 0.4:
+            # Relaxed confidence threshold (was 0.4, now 0.3)
+            if confidence <= 0.3:
                 continue
             
             # Estimate distance from depth image (if available)
             distance_cm = None
             center_x = x + w_box // 2
             center_y = y + h_box // 2
-            if self.latest_depth is not None:
-                try:
-                    if 0 <= center_y < self.latest_depth.shape[0] and 0 <= center_x < self.latest_depth.shape[1]:
-                        depth_value = self.latest_depth[center_y, center_x]
-                        # Convert depth to cm (assuming depth is in mm or meters, adjust as needed)
-                        if depth_value > 0:
-                            distance_cm = float(depth_value) / 10.0  # Adjust conversion factor as needed
-                except Exception as e:
-                    pass  # Distance estimation failed, leave as None
+            
+            if self.real_hardware:
+                # Use RealSense SDK for accurate depth reading
+                if self.rs_pipeline is not None and self.rs_align is not None and self.rs_intrinsics is not None:
+                    try:
+                        # Get frames from pipeline
+                        frames = self.rs_pipeline.wait_for_frames(timeout_ms=100)
+                        
+                        # Step 1: Align depth to color
+                        aligned_frames = self.rs_align.process(frames)
+                        
+                        # Get aligned depth frame
+                        aligned_depth_frame = aligned_frames.get_depth_frame()
+                        
+                        if aligned_depth_frame:
+                            # Step 2: Get depth at pixel (in meters)
+                            depth_value = aligned_depth_frame.get_distance(center_x, center_y)
+                            
+                            if depth_value > 0:
+                                # Convert meters to cm
+                                distance_cm = float(depth_value * 100.0)
+                                
+                                # Optional: Deproject to 3D point for verification
+                                # point_3d = rs.rs2_deproject_pixel_to_point(
+                                #     self.rs_intrinsics,
+                                #     [center_x, center_y],
+                                #     depth_value
+                                # )
+                    except Exception as e:
+                        # Fallback to topic-based depth if RealSense SDK fails
+                        if self.latest_depth is not None:
+                            try:
+                                if 0 <= center_y < self.latest_depth.shape[0] and 0 <= center_x < self.latest_depth.shape[1]:
+                                    depth_value = self.latest_depth[center_y, center_x]
+                                    if depth_value > 0:
+                                        distance_cm = float(depth_value) / 10.0
+                            except Exception:
+                                pass
+                else:
+                    # Fallback to topic-based depth
+                    if self.latest_depth is not None:
+                        try:
+                            if 0 <= center_y < self.latest_depth.shape[0] and 0 <= center_x < self.latest_depth.shape[1]:
+                                depth_value = self.latest_depth[center_y, center_x]
+                                if depth_value > 0:
+                                    distance_cm = float(depth_value) / 10.0
+                        except Exception:
+                            pass
+            else:
+                # Simulation mode: use topic-based depth
+                if self.latest_depth is not None:
+                    try:
+                        if 0 <= center_y < self.latest_depth.shape[0] and 0 <= center_x < self.latest_depth.shape[1]:
+                            depth_value = self.latest_depth[center_y, center_x]
+                            # Convert depth to cm (assuming depth is in mm or meters, adjust as needed)
+                            if depth_value > 0:
+                                distance_cm = float(depth_value) / 10.0  # Adjust conversion factor as needed
+                    except Exception as e:
+                        pass  # Distance estimation failed, leave as None
             
             # Calculate IoU with previous frame detections (for AP-style metric)
             iou_score = 0.0
@@ -693,6 +834,11 @@ class SimpleSAMDetector(Node):
             }
             
             detections.append(detection)
+        
+        self.get_logger().info(f"Final detections after filtering: {len(detections)} objects")
+        if len(detections) == 0:
+            self.get_logger().warn("⚠️ No objects detected - image may have uniform background or low contrast")
+            self.get_logger().warn(f"   Try adjusting lighting or moving objects closer to camera")
         
         return detections
     
@@ -918,6 +1064,10 @@ class SimpleSAMDetector(Node):
         # Create visualization image
         vis_image = frame_to_display.copy()
         
+        # Determine if we should show corner points (when detections < 3)
+        # For debug and finding u,v in image
+        show_corner_points = len(self.latest_detections) < 3
+        
         # Draw detections
         for idx, det in enumerate(self.latest_detections):
             bbox = det['bbox']
@@ -933,6 +1083,60 @@ class SimpleSAMDetector(Node):
                 (0, 255, 0),  # Green
                 2
             )
+            
+            # Display 4 corner coordinates if detections < 3
+            #debug for checking the u,v 
+            if show_corner_points:
+                font_scale = 0.5
+                font_thickness = 1
+                text_color = (255, 255, 0)  # Cyan text
+                bg_color = (0, 0, 0)  # Black background
+                padding = 3
+                
+                # Corner coordinates
+                corners = [
+                    (bbox[0], bbox[1], "TL"),  # Top-left
+                    (bbox[2], bbox[1], "TR"),  # Top-right
+                    (bbox[0], bbox[3], "BL"),  # Bottom-left
+                    (bbox[2], bbox[3], "BR")   # Bottom-right
+                ]
+                
+                for x, y, corner_name in corners:
+                    # Create coordinate text
+                    coord_text = f"{corner_name}:({x},{y})"
+                    
+                    # Get text size for background
+                    text_size, _ = cv2.getTextSize(coord_text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, font_thickness)
+                    
+                    # Adjust text position based on corner to avoid going off-screen
+                    if corner_name == "TL":
+                        text_x, text_y = x + 5, y + 15
+                    elif corner_name == "TR":
+                        text_x, text_y = x - text_size[0] - 5, y + 15
+                    elif corner_name == "BL":
+                        text_x, text_y = x + 5, y - 5
+                    else:  # BR
+                        text_x, text_y = x - text_size[0] - 5, y - 5
+                    
+                    # Draw background rectangle
+                    cv2.rectangle(
+                        vis_image,
+                        (text_x - padding, text_y - text_size[1] - padding),
+                        (text_x + text_size[0] + padding, text_y + padding),
+                        bg_color,
+                        -1
+                    )
+                    
+                    # Draw coordinate text
+                    cv2.putText(
+                        vis_image,
+                        coord_text,
+                        (text_x, text_y),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        font_scale,
+                        text_color,
+                        font_thickness
+                    )
             
             # Draw filled mask with transparency
             mask = det['mask']
@@ -974,7 +1178,8 @@ class SimpleSAMDetector(Node):
         
         # Add info overlay
         mode_text = "CONTINUOUS" if self.continuous_detection else "SINGLE SHOT"
-        info_text = f"Mode: {mode_text} | Objects: {len(self.latest_detections)}"
+        corner_indicator = " [CORNER POINTS ON]" if show_corner_points else ""
+        info_text = f"Mode: {mode_text} | Objects: {len(self.latest_detections)}{corner_indicator}"
         
         cv2.putText(
             vis_image,
