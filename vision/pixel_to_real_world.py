@@ -51,26 +51,14 @@ class PixelToRealWorldService(Node):
     def __init__(self):
         super().__init__('pixel_to_real_node')
         
-        # Parameter toggles simulated vs hardware camera topics
-        self.declare_parameter('real_hardware', False)
-        self.real_hardware = bool(self.get_parameter('real_hardware').value)
         
-        # Camera topic configuration based on hardware type
-        if self.real_hardware:
-            self.rgb_topic = '/camera/color/image_raw'
-            self.depth_topic = '/camera/depth/image_rect_raw'
-            self.camera_info_topic = '/camera/depth/camera_info'  # Use depth camera_info
-            self.color_encoding = 'passthrough'
-            self.depth_32_encoding = 'passthrough'
-            self.depth_16_encoding = 'passthrough'
+        self.rgb_topic = '/camera/color/image_raw'
+        self.depth_topic = '/camera/depth/image_rect_raw'
+        self.camera_info_topic = '/camera/depth/camera_info'  # Use depth camera_info
+        self.color_encoding = 'passthrough'
+        self.depth_32_encoding = 'passthrough'
+        self.depth_16_encoding = 'passthrough'
 
-            
-        else:
-            self.rgb_topic = '/camera/image_raw'
-            self.depth_topic = '/camera/depth/image_raw'
-            self.camera_info_topic = '/camera/camera_info'
-            self.color_encoding = 'bgr8'
-            self.depth_encoding = '32FC1'
         
         # CvBridge for ROS<->OpenCV conversion
         self.bridge = CvBridge()
@@ -111,7 +99,6 @@ class PixelToRealWorldService(Node):
         self.get_logger().info(f'RGB topic: {self.rgb_topic}')
         self.get_logger().info(f'Depth topic: {self.depth_topic}')
         self.get_logger().info(f'Camera info topic: {self.camera_info_topic}')
-        self.get_logger().info(f'Real hardware mode: {self.real_hardware}')
         
         # Create ROS2 service
         if PixelToReal is not None:
