@@ -127,27 +127,13 @@ class PixelToRealServer(Node):
             self.depth_32_encoding = 'passthrough'
             self.depth_16_encoding = 'passthrough'
             
-            # Initialize RealSense pipeline
-            try:
-                self.rs_pipeline = rs.pipeline()
-                config = rs.config()
-                config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 30)
-                config.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
-                profile = self.rs_pipeline.start(config)
-                
-                # Create align object to align depth to color
-                self.rs_align = rs.align(rs.stream.color)
-                
-                # Get intrinsics from color stream
-                color_profile = profile.get_stream(rs.stream.color)
-                self.rs_intrinsics = color_profile.as_video_stream_profile().intrinsics
-                
-                self.get_logger().info('RealSense pipeline initialized successfully')
-                self.get_logger().info(f'Color intrinsics: fx={self.rs_intrinsics.fx}, fy={self.rs_intrinsics.fy}, ppx={self.rs_intrinsics.ppx}, ppy={self.rs_intrinsics.ppy}')
-            except Exception as e:
-                self.get_logger().error(f'Failed to initialize RealSense pipeline: {e}')
-                self.get_logger().warn('Falling back to topic-based depth reading')
-                self.rs_pipeline = None
+            # Note: We DO NOT initialize RealSense pipeline here!
+            # The camera is published by a separate node (e.g., realsense-ros)
+            # We only subscribe to the published topics
+            self.get_logger().info('Real hardware mode: subscribing to RealSense topics')
+            self.get_logger().info(f'  RGB: {self.rgb_topic}')
+            self.get_logger().info(f'  Depth: {self.depth_topic}')
+            self.get_logger().info(f'  Camera Info: {self.camera_info_topic}')
         else:
             self.rgb_topic = rgb_topic or '/camera/image_raw'
             self.depth_topic = depth_topic or '/camera/depth/image_raw'
@@ -363,61 +349,11 @@ class PixelToRealServer(Node):
 
 
         #ros2 service call /pixel_to_real custom_interfaces/srv/PixelToReal "{u: 220, v: 220}"
-        # Try direct bilinear interpolation first
-        if self.real_hardware:
-            # Use RealSense SDK for proper depth reading
-            if self.rs_pipeline is not None and self.rs_align is not None and self.rs_intrinsics is not None:
-                try:
-                    # Get frames from pipeline
-                    frames = self.rs_pipeline.wait_for_frames(timeout_ms=1000)
-                    
-                    # Step 1: Align depth to color
-                    aligned_frames = self.rs_align.process(frames)
-                    
-                    # Get aligned depth and color frames
-                    aligned_depth_frame = aligned_frames.get_depth_frame()
-                    color_frame = aligned_frames.get_color_frame()
-                    
-                    if not aligned_depth_frame or not color_frame:
-                        self.get_logger().warn('Failed to get aligned frames')
-                        d = self.latest_depth[int(v), int(u)] if self.latest_depth is not None else 0.8
-                    else:
-                        # Step 2: Get depth at pixel (in meters)
-                        depth_value = aligned_depth_frame.get_distance(int(u), int(v))
-                        
-                        # Step 3: Get intrinsics (already stored in self.rs_intrinsics)
-                        # Step 4: Deproject pixel to 3D point
-                        point_3d = rs.rs2_deproject_pixel_to_point(
-                            self.rs_intrinsics,
-                            [int(u), int(v)],
-                            depth_value
-                        )
-                        
-                        # point_3d is [x, y, z] in camera coordinate frame (meters)
-                        # For this service, we primarily need the depth (z-component)
-                        d = depth_value
-                        
-                        self.get_logger().info(f'Read depth at ({u},{v}): {d:.3f}m (RealSense SDK mode)')
-                        self.get_logger().info(f'Deprojected 3D point in camera frame: x={point_3d[0]:.3f}, y={point_3d[1]:.3f}, z={point_3d[2]:.3f}')
-                        
-                        # Return the depth value for further processing
-                        return d
-                        
-                except Exception as e:
-                    self.get_logger().error(f'RealSense pipeline error: {e}')
-                    # Fallback to topic-based depth
-                    if self.latest_depth is not None:
-                        d = self.latest_depth[int(v), int(u)]
-                        self.get_logger().info(f'Fallback: Read depth at ({u},{v}): {d:.3f}m from topic')
-                    else:
-                        self.get_logger().warn('No depth data available, using default 0.8m')
-                        return 0.8
-            else:
-                # Fallback to simple depth reading from topic
-                if self.latest_depth is not None:
-                    d = self.latest_depth[int(v), int(u)]
-                    self.get_logger().info(f'Read depth at ({u},{v}): {d:.3f}m (topic-based hardware mode)')
-                else:
+        # Use topic-based depth reading for both hardware and simulation
+        if self.latest_depth is not None:
+            d = self.latest_depth[int(v), int(u)]
+            self.get_logger().info(f'Read depth at ({u},{v}): {d:.3f}m from topic')
+        else:
                     self.get_logger().warn('No depth data available, using default 0.8m')
                     return 0.8
 

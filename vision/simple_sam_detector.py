@@ -68,27 +68,14 @@ class SimpleSAMDetector(Node):
             self.camera_info_topic = 'camera/color/camera_info'
             self.desired_encoding = 'passthrough'
             
-            # Initialize RealSense pipeline for direct SDK access
-            try:
-                self.rs_pipeline = rs.pipeline()
-                config = rs.config()
-                config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 30)
-                config.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
-                profile = self.rs_pipeline.start(config)
-                
-                # Create align object to align depth to color
-                self.rs_align = rs.align(rs.stream.color)
-                
-                # Get intrinsics from color stream
-                color_profile = profile.get_stream(rs.stream.color)
-                self.rs_intrinsics = color_profile.as_video_stream_profile().intrinsics
-                
-                self.get_logger().info('RealSense pipeline initialized successfully')
-                self.get_logger().info(f'Color intrinsics: fx={self.rs_intrinsics.fx}, fy={self.rs_intrinsics.fy}, ppx={self.rs_intrinsics.ppx}, ppy={self.rs_intrinsics.ppy}')
-            except Exception as e:
-                self.get_logger().error(f'Failed to initialize RealSense pipeline: {e}')
-                self.get_logger().warn('Falling back to topic-based depth reading')
-                self.rs_pipeline = None
+            # Note: We DO NOT initialize RealSense pipeline here!
+            # The camera is published by a separate node (e.g., realsense-ros)
+            # We only subscribe to the published topics
+            self.get_logger().info('Real hardware mode: subscribing to RealSense topics')
+            self.get_logger().info(f'  RGB: {self.rgb_topic}')
+            self.get_logger().info(f'  Depth: {self.depth_topic}')
+            self.get_logger().info(f'  Camera Info: {self.camera_info_topic}')
+            self.rs_pipeline = None
         else:
             self.rgb_topic = '/camera/image_raw'
             self.depth_topic = '/camera/depth/image_raw'
@@ -747,64 +734,22 @@ class SimpleSAMDetector(Node):
             center_x = x + w_box // 2
             center_y = y + h_box // 2
             
-            if self.real_hardware:
-                # Use RealSense SDK for accurate depth reading
-                if self.rs_pipeline is not None and self.rs_align is not None and self.rs_intrinsics is not None:
-                    try:
-                        # Get frames from pipeline
-                        frames = self.rs_pipeline.wait_for_frames(timeout_ms=100)
-                        
-                        # Step 1: Align depth to color
-                        aligned_frames = self.rs_align.process(frames)
-                        
-                        # Get aligned depth frame
-                        aligned_depth_frame = aligned_frames.get_depth_frame()
-                        
-                        if aligned_depth_frame:
-                            # Step 2: Get depth at pixel (in meters)
-                            depth_value = aligned_depth_frame.get_distance(center_x, center_y)
-                            
-                            if depth_value > 0:
-                                # Convert meters to cm
-                                distance_cm = float(depth_value * 100.0)
-                                
-                                # Optional: Deproject to 3D point for verification
-                                # point_3d = rs.rs2_deproject_pixel_to_point(
-                                #     self.rs_intrinsics,
-                                #     [center_x, center_y],
-                                #     depth_value
-                                # )
-                    except Exception as e:
-                        # Fallback to topic-based depth if RealSense SDK fails
-                        if self.latest_depth is not None:
-                            try:
-                                if 0 <= center_y < self.latest_depth.shape[0] and 0 <= center_x < self.latest_depth.shape[1]:
-                                    depth_value = self.latest_depth[center_y, center_x]
-                                    if depth_value > 0:
-                                        distance_cm = float(depth_value) / 10.0
-                            except Exception:
-                                pass
-                else:
-                    # Fallback to topic-based depth
-                    if self.latest_depth is not None:
-                        try:
-                            if 0 <= center_y < self.latest_depth.shape[0] and 0 <= center_x < self.latest_depth.shape[1]:
-                                depth_value = self.latest_depth[center_y, center_x]
-                                if depth_value > 0:
-                                    distance_cm = float(depth_value) / 10.0
-                        except Exception:
-                            pass
-            else:
-                # Simulation mode: use topic-based depth
-                if self.latest_depth is not None:
-                    try:
-                        if 0 <= center_y < self.latest_depth.shape[0] and 0 <= center_x < self.latest_depth.shape[1]:
-                            depth_value = self.latest_depth[center_y, center_x]
-                            # Convert depth to cm (assuming depth is in mm or meters, adjust as needed)
-                            if depth_value > 0:
-                                distance_cm = float(depth_value) / 10.0  # Adjust conversion factor as needed
-                    except Exception as e:
-                        pass  # Distance estimation failed, leave as None
+            # Use topic-based depth reading for both hardware and simulation
+            if self.latest_depth is not None:
+                try:
+                    if 0 <= center_y < self.latest_depth.shape[0] and 0 <= center_x < self.latest_depth.shape[1]:
+                        depth_value = self.latest_depth[center_y, center_x]
+                        if depth_value > 0:
+                            # Convert depth to cm
+                            # For RealSense topics, depth is typically in millimeters (uint16) or meters (float32)
+                            if self.real_hardware:
+                                # RealSense depth is in millimeters for 16UC1
+                                distance_cm = float(depth_value) / 10.0
+                            else:
+                                # Simulation depth may be in meters (float32) or mm
+                                distance_cm = float(depth_value) / 10.0
+                except Exception as e:
+                    pass  # Distance estimation failed, leave as None
             
             # Calculate IoU with previous frame detections (for AP-style metric)
             iou_score = 0.0
@@ -1066,7 +1011,7 @@ class SimpleSAMDetector(Node):
         
         # Determine if we should show corner points (when detections < 3)
         # For debug and finding u,v in image
-        show_corner_points = len(self.latest_detections) < 3
+        show_corner_points = len(self.latest_detections) < 5
         
         # Draw detections
         for idx, det in enumerate(self.latest_detections):
@@ -1085,53 +1030,44 @@ class SimpleSAMDetector(Node):
             )
             
             # Display 4 corner coordinates if detections < 3
-            #debug for checking the u,v 
+            # Debug: Show corner coordinates when detections < 5 (for u,v verification)
             if show_corner_points:
-                font_scale = 0.5
+                font_scale = 0.4
                 font_thickness = 1
-                text_color = (255, 255, 0)  # Cyan text
+                text_color = (0, 255, 255)  # Yellow text for visibility
                 bg_color = (0, 0, 0)  # Black background
-                padding = 3
+                padding = 2
                 
-                # Corner coordinates
-                corners = [
-                    (bbox[0], bbox[1], "TL"),  # Top-left
-                    (bbox[2], bbox[1], "TR"),  # Top-right
-                    (bbox[0], bbox[3], "BL"),  # Bottom-left
-                    (bbox[2], bbox[3], "BR")   # Bottom-right
+                # Draw all 4 corners in multi-line format for better readability
+                corners_text = [
+                    f"TL:({bbox[0]},{bbox[1]})",
+                    f"TR:({bbox[2]},{bbox[1]})",
+                    f"BL:({bbox[0]},{bbox[3]})",
+                    f"BR:({bbox[2]},{bbox[3]})"
                 ]
                 
-                for x, y, corner_name in corners:
-                    # Create coordinate text
-                    coord_text = f"{corner_name}:({x},{y})"
+                # Position text block above bbox
+                start_y = max(bbox[1] - 80, 20)  # Ensure it stays on screen
+                line_height = 18
+                
+                for i, line_text in enumerate(corners_text):
+                    text_size, _ = cv2.getTextSize(line_text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, font_thickness)
+                    y_pos = start_y + (i * line_height)
                     
-                    # Get text size for background
-                    text_size, _ = cv2.getTextSize(coord_text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, font_thickness)
-                    
-                    # Adjust text position based on corner to avoid going off-screen
-                    if corner_name == "TL":
-                        text_x, text_y = x + 5, y + 15
-                    elif corner_name == "TR":
-                        text_x, text_y = x - text_size[0] - 5, y + 15
-                    elif corner_name == "BL":
-                        text_x, text_y = x + 5, y - 5
-                    else:  # BR
-                        text_x, text_y = x - text_size[0] - 5, y - 5
-                    
-                    # Draw background rectangle
+                    # Draw background
                     cv2.rectangle(
                         vis_image,
-                        (text_x - padding, text_y - text_size[1] - padding),
-                        (text_x + text_size[0] + padding, text_y + padding),
+                        (bbox[0] - padding, y_pos - text_size[1] - padding),
+                        (bbox[0] + text_size[0] + padding, y_pos + padding),
                         bg_color,
                         -1
                     )
                     
-                    # Draw coordinate text
+                    # Draw text
                     cv2.putText(
                         vis_image,
-                        coord_text,
-                        (text_x, text_y),
+                        line_text,
+                        (bbox[0], y_pos),
                         cv2.FONT_HERSHEY_SIMPLEX,
                         font_scale,
                         text_color,

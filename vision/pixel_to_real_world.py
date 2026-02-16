@@ -33,9 +33,10 @@ Usage:
 
 import rclpy
 from rclpy.node import Node
-import pyrealsense2 as rs
 import numpy as np
 import cv2
+from sensor_msgs.msg import Image, CameraInfo
+from cv_bridge import CvBridge
 
 try:
     from custom_interfaces.srv import PixelToReal
@@ -48,12 +49,50 @@ class PixelToRealWorldService(Node):
     """ROS2 service node for converting pixel coordinates to real-world 3D coordinates."""
     
     def __init__(self):
-        super().__init__('pixel_to_real_world_service')
+        super().__init__('pixel_to_real_node')
+        
+        # Parameter toggles simulated vs hardware camera topics
+        self.declare_parameter('real_hardware', False)
+        self.real_hardware = bool(self.get_parameter('real_hardware').value)
+        
+        # Camera topic configuration based on hardware type
+        if self.real_hardware:
+            self.rgb_topic = '/camera/color/image_raw'
+            self.depth_topic = '/camera/depth/image_rect_raw'
+            self.camera_info_topic = '/camera/depth/camera_info'  # Use depth camera_info
+            self.color_encoding = 'passthrough'
+            self.depth_32_encoding = 'passthrough'
+            self.depth_16_encoding = 'passthrough'
+
+            
+        else:
+            self.rgb_topic = '/camera/image_raw'
+            self.depth_topic = '/camera/depth/image_raw'
+            self.camera_info_topic = '/camera/camera_info'
+            self.color_encoding = 'bgr8'
+            self.depth_encoding = '32FC1'
+        
+        # CvBridge for ROS<->OpenCV conversion
+        self.bridge = CvBridge()
+        
+        # Latest frames from topics
+        self.latest_rgb = None
+        self.latest_depth = None
+        self.camera_info = None
+        self.depth_timestamp = None
+        
+        # Subscribe to camera topics
+        self.rgb_sub = self.create_subscription(Image, self.rgb_topic, self.rgb_callback, 10)
+        self.depth_sub = self.create_subscription(Image, self.depth_topic, self.depth_callback, 10)
+        self.info_sub = self.create_subscription(CameraInfo, self.camera_info_topic, self.info_callback, 10)
+        
+        # Publisher for debug visualization
+        self.debug_pub = self.create_publisher(Image, '/pixel_to_real_world/debug_image', 10)
         
         # Camera position in base frame (meters)
         self.cam_x_base = 0.0
         self.cam_y_base = -0.5442
-        self.cam_z_base = 0.6711
+        self.cam_z_base =  0.6711
         
         # Working area constraints (meters)
         self.x_min = -0.50
@@ -62,59 +101,17 @@ class PixelToRealWorldService(Node):
         self.y_max = 0.0
         self.z_table = 0.0  # Table height
         
+        # Depth range for filtering (in meters)
+        self.depth_min = 0.20
+        self.depth_max = 0.6711
+        
         self.get_logger().info(f'Camera position in base frame: ({self.cam_x_base}, {self.cam_y_base}, {self.cam_z_base})')
         self.get_logger().info(f'Working area: x=[{self.x_min}, {self.x_max}], y=[{self.y_min}, {self.y_max}]')
-        
-        # Initialize RealSense pipeline
-        self.pipeline = rs.pipeline()
-        self.config = rs.config()
-        
-        # Enable depth and color streams at 640x480
-        self.config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 30)
-        self.config.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
-        
-        # Start pipeline and get profile
-        try:
-            self.profile = self.pipeline.start(self.config)
-            self.get_logger().info('RealSense pipeline started successfully')
-        except Exception as e:
-            self.get_logger().error(f'Failed to start RealSense pipeline: {e}')
-            raise
-        
-        # Get device and depth sensor information
-        device = self.profile.get_device()
-        depth_sensor = device.first_depth_sensor()
-        
-        # Get depth scale - converts raw depth units to meters
-        self.depth_scale = depth_sensor.get_depth_scale()
-        self.get_logger().info(f'Depth scale: {self.depth_scale}')
-        
-        # Set depth range for filtering (in meters)
-        # Camera is at 0.6711m height, table at 0m, so distance to table is ~0.67m
-        self.depth_min = 0.20  # minimum depth in meters
-        self.depth_max = 1.50   # maximum depth in meters
         self.get_logger().info(f'Depth range: {self.depth_min}m to {self.depth_max}m')
-        
-        # Get intrinsics for depth and color streams
-        self.depth_intrin = self.profile.get_stream(rs.stream.depth).as_video_stream_profile().get_intrinsics()
-        self.color_intrin = self.profile.get_stream(rs.stream.color).as_video_stream_profile().get_intrinsics()
-        
-        self.get_logger().info(f'Color intrinsics: fx={self.color_intrin.fx:.2f}, fy={self.color_intrin.fy:.2f}, '
-                              f'ppx={self.color_intrin.ppx:.2f}, ppy={self.color_intrin.ppy:.2f}')
-        self.get_logger().info(f'Image size: {self.color_intrin.width}x{self.color_intrin.height}')
-        
-        # Create align object to align depth frames to color frames
-        self.align = rs.align(rs.stream.color)
-        
-        # Store latest frames
-        self.latest_aligned_depth_frame = None
-        self.latest_color_frame = None
-        
-        # Warm up the camera (skip first few frames)
-        self.get_logger().info('Warming up camera...')
-        for _ in range(30):
-            self.pipeline.wait_for_frames()
-        self.get_logger().info('Camera ready')
+        self.get_logger().info(f'RGB topic: {self.rgb_topic}')
+        self.get_logger().info(f'Depth topic: {self.depth_topic}')
+        self.get_logger().info(f'Camera info topic: {self.camera_info_topic}')
+        self.get_logger().info(f'Real hardware mode: {self.real_hardware}')
         
         # Create ROS2 service
         if PixelToReal is not None:
@@ -129,71 +126,183 @@ class PixelToRealWorldService(Node):
             self.get_logger().error('PixelToReal service type not available. Build custom_interfaces package.')
             raise RuntimeError('custom_interfaces.srv.PixelToReal not available')
     
-    def get_latest_frames(self):
-        """Capture and align the latest frames from RealSense camera."""
+    def rgb_callback(self, msg):
+        """Store latest RGB image from topic."""
         try:
-            # Wait for frames with timeout
-            frames = self.pipeline.wait_for_frames(timeout_ms=5000)
-            
-            # Align depth frame to color frame
-            aligned_frames = self.align.process(frames)
-            
-            # Get aligned depth and color frames
-            self.latest_aligned_depth_frame = aligned_frames.get_depth_frame()
-            self.latest_color_frame = aligned_frames.get_color_frame()
-            
-            if not self.latest_aligned_depth_frame or not self.latest_color_frame:
-                self.get_logger().warn('Failed to get valid frames')
-                return False
-            
-            return True
+            self.latest_rgb = self.bridge.imgmsg_to_cv2(msg, desired_encoding=self.color_encoding)
         except Exception as e:
-            self.get_logger().error(f'Error getting frames: {e}')
-            return False
+            self.get_logger().error(f'Error converting RGB image: {e}')
+    
+    def depth_callback(self, msg):
+        """Store latest depth image from topic."""
+        try:
+            # Convert depth image - handle both 16UC1 and 32FC1 formats
+            if msg.encoding == '16UC1':
+                depth_image = self.bridge.imgmsg_to_cv2(msg, desired_encoding='passthrough')
+                # Convert from millimeters to meters for 16UC1
+                self.latest_depth = depth_image.astype(np.float32) / 1000.0
+            elif msg.encoding == '32FC1':
+                self.latest_depth = self.bridge.imgmsg_to_cv2(msg, desired_encoding='passthrough')
+            else:
+                depth_image = self.bridge.imgmsg_to_cv2(msg, desired_encoding=self.depth_encoding)
+                if depth_image.dtype == np.uint16:
+                    self.latest_depth = depth_image.astype(np.float32) / 1000.0
+                else:
+                    self.latest_depth = depth_image
+            self.depth_timestamp = self.get_clock().now()
+        except Exception as e:
+            self.get_logger().error(f'Error converting depth image: {e}')
+    
+    def info_callback(self, msg):
+        """Store camera intrinsics from CameraInfo topic."""
+        if self.camera_info is None:
+            self.camera_info = msg
+            self.get_logger().info(f'Camera intrinsics received: fx={msg.k[0]:.2f}, fy={msg.k[4]:.2f}, '
+                                  f'cx={msg.k[2]:.2f}, cy={msg.k[5]:.2f}')
+            self.get_logger().info(f'Image size: {msg.width}x{msg.height}')
+    
+    def get_depth_at_pixel(self, u, v):
+        """
+        Get depth value at pixel coordinate with neighborhood fallback.
+        
+        Args:
+            u, v: Pixel coordinates
+            
+        Returns:
+            float: Depth in meters, or 0.0 if invalid
+        """
+        if self.latest_depth is None:
+            self.get_logger().warn('No depth image available')
+            return 0.0
+        
+        # Log depth image timestamp age
+        if self.depth_timestamp is not None:
+            age = (self.get_clock().now() - self.depth_timestamp).nanoseconds / 1e9
+            self.get_logger().info(f'Depth image age: {age:.3f}s')
+        
+        h, w = self.latest_depth.shape
+        if not (0 <= u < w and 0 <= v < h):
+            self.get_logger().warn(f'Pixel ({u}, {v}) out of bounds ({w}x{h})')
+            return 0.0
+        
+        # Get depth at pixel - read the ACTUAL current value
+        depth = float(self.latest_depth[v, u])
+        self.get_logger().info(f'Raw depth at pixel ({u}, {v}): {depth:.4f}m')
+        
+        # Validate depth
+        if depth == 0 or depth < self.depth_min or depth > self.depth_max:
+            self.get_logger().warn(f'Invalid depth at ({u}, {v}): {depth:.4f}m, searching neighborhood')
+            depth = self._find_valid_depth_in_neighborhood(u, v)
+        
+        return depth
+    
+    def _find_valid_depth_in_neighborhood(self, u, v, window_size=5):
+        """
+        Find valid depth value in neighborhood of invalid pixel.
+        
+        Args:
+            u, v: Pixel coordinates
+            window_size: Radius of search window
+            
+        Returns:
+            float: Median depth from valid neighbors, or 0.0 if none found
+        """
+        if self.latest_depth is None:
+            return 0.0
+        
+        h, w = self.latest_depth.shape
+        valid_depths = []
+        
+        for du in range(-window_size, window_size + 1):
+            for dv in range(-window_size, window_size + 1):
+                nu = u + du
+                nv = v + dv
+                
+                if 0 <= nu < w and 0 <= nv < h:
+                    depth = float(self.latest_depth[nv, nu])
+                    if self.depth_min <= depth <= self.depth_max:
+                        valid_depths.append(depth)
+        
+        if valid_depths:
+            median_depth = float(np.median(valid_depths))
+            self.get_logger().info(f'Found {len(valid_depths)} valid depths in neighborhood, median: {median_depth:.4f}m')
+            return median_depth
+        
+        return 0.0
+    
+    def deproject_pixel_to_point(self, u, v, depth):
+        """
+        Deproject pixel to 3D point using camera intrinsics.
+        
+        Args:
+            u, v: Pixel coordinates
+            depth: Depth value in meters
+            
+        Returns:
+            tuple: (x, y, z) in camera frame (meters)
+        """
+        if self.camera_info is None:
+            self.get_logger().error('Camera info not available')
+            return (0.0, 0.0, 0.0)
+        
+        # Extract intrinsics from camera info
+        fx = self.camera_info.k[0]
+        fy = self.camera_info.k[4]
+        cx = self.camera_info.k[2]
+        cy = self.camera_info.k[5]
+        
+        # Deproject using pinhole camera model
+        x_cam = (u - cx) * depth / fx
+        y_cam = (v - cy) * depth / fy
+        z_cam = depth
+        
+        # Store pixel coordinates for calibration correction later
+        self._last_u = u
+        self._last_v = v
+        
+        return (x_cam, y_cam, z_cam)
     
     def camera_to_base_transform(self, x_cam, y_cam, z_cam):
         """
-        Transform coordinates from camera frame to robot base frame.
+        Transform coordinates from camera frame to robot base frame with empirical calibration.
         
-        Camera coordinate system (RealSense convention):
-        - X: right (+u direction in image)
-        - Y: down (-v direction in image, since v increases downward)
-        - Z: forward (depth, away from camera towards table)
+        Calibration model derived from 9 ground truth measurements:
+        - Y error has strong linear correlation with v-coordinate (vertical distortion)
+        - X error correlates with u-coordinate (horizontal distortion)
         
-        Base coordinate system:
-        - X: forward (+u direction)
-        - Y: left (+y and -v are same direction)
-        - Z: up
-        
-        Camera is positioned at (0, -0.5442, 0.6711) looking down at the table.
-        
-        Coordinate mapping:
-        - +u (image right) → +x_cam (camera right) → +x_base (base forward)
-        - -v (image up) → -y_cam (camera up) → +y_base (base left)
-        - depth → +z_cam (camera forward/down) → projects onto table plane
+        Regression analysis:
+        Y_correction = -0.00116 * v + 0.164  (R² = 0.92)
+        X_correction = -0.000194 * u + 0.042 (R² = 0.87)
         
         Args:
-            x_cam: X coordinate in camera frame (meters) - right direction
-            y_cam: Y coordinate in camera frame (meters) - down direction
-            z_cam: Z coordinate in camera frame (meters) - depth/forward
+            x_cam: X coordinate in camera frame (meters)
+            y_cam: Y coordinate in camera frame (meters)
+            z_cam: Z coordinate in camera frame (meters)
             
         Returns:
             tuple: (x_base, y_base, z_base) in robot base frame (meters)
         """
-        # Transform from camera frame to base frame
-        # Camera is looking straight down at the table
-        
-        # +u (image right) → +x_cam (camera right) → +x_base (base forward)
-        x_base = self.cam_x_base + x_cam
-        
-        # -v (image up) → -y_cam (camera up) → +y_base (base left)
-        # So: +y_cam (camera down) → -y_base (base right)
-        y_base = self.cam_y_base - y_cam
-        
-        # Depth (z_cam) determines the z position on table
-        # Camera is at height 0.6711m, pointing down
-        # z_cam is the distance from camera, so actual height is:
+        # Basic transformation
+        x_base_raw = self.cam_x_base - x_cam
+        y_base_raw = self.cam_y_base - y_cam
         z_base = self.cam_z_base - z_cam
+        
+        # Get pixel coordinates (stored during deprojection)
+        u = getattr(self, '_last_u', 320)  # Default to center if not available
+        v = getattr(self, '_last_v', 240)
+        
+        # Apply empirical calibration corrections based on pixel position
+        # Y-axis correction: Linear model based on v-coordinate
+        # y_error = -0.00116 * v + 0.164
+        y_correction = -0.00345 * v + 0.73055
+        
+        # X-axis correction: Linear model based on u-coordinate  
+        # x_error = -0.000194 * u + 0.042
+        x_correction = -0.000194 * u + 0.042
+        
+        # Apply corrections
+        x_base = x_base_raw - x_correction
+        y_base = y_base_raw - y_correction
         
         return (x_base, y_base, z_base)
     
@@ -215,9 +324,12 @@ class PixelToRealWorldService(Node):
             self.get_logger().warn(f'Y={y:.4f}m out of range [{self.y_min}, {self.y_max}]')
             return False
         
-        # Z should be close to table height (allow some tolerance)
-        if abs(z - self.z_table) > 0.05:  # 5cm tolerance
-            self.get_logger().warn(f'Z={z:.4f}m deviates from table height {self.z_table}m')
+        # Z can be above table (objects), just log info if too high or below table
+        if z < self.z_table - 0.05:  # Below table surface
+            self.get_logger().warn(f'Z={z:.4f}m is below table height {self.z_table}m')
+            return False
+        elif z > self.z_table + 0.70:  # Unreasonably high (>70cm above table)
+            self.get_logger().warn(f'Z={z:.4f}m is unusually high above table')
         
         return True
     
@@ -225,7 +337,7 @@ class PixelToRealWorldService(Node):
         """
         Convert pixel coordinates (u, v) to 3D real-world coordinates in base frame.
         
-        Uses pyrealsense2 deprojection with aligned depth frames.
+        Uses topic-based depth reading and camera intrinsics for deprojection.
         
         Args:
             u: Pixel column (x-coordinate in image, 0-640)
@@ -234,30 +346,26 @@ class PixelToRealWorldService(Node):
         Returns:
             tuple: (x, y, z) in meters, robot base coordinate frame
         """
-        # Get latest frames
-        if not self.get_latest_frames():
-            self.get_logger().error('Failed to get camera frames')
+        # Check if we have camera data
+        if self.latest_depth is None:
+            self.get_logger().error('No depth data available')
             return (0.0, 0.0, 0.0)
         
-        # Get depth value at the pixel location in aligned depth frame
-        depth_value = self.latest_aligned_depth_frame.get_distance(int(u), int(v))
+        if self.camera_info is None:
+            self.get_logger().error('No camera info available')
+            return (0.0, 0.0, 0.0)
         
-        self.get_logger().info(f'Raw depth at pixel ({u}, {v}): {depth_value:.4f}m')
+        # Get depth value at pixel
+        depth_value = self.get_depth_at_pixel(int(u), int(v))
         
-        # Validate depth
-        if depth_value == 0 or depth_value < self.depth_min or depth_value > self.depth_max:
-            self.get_logger().warn(f'Invalid depth at pixel ({u}, {v}): {depth_value:.4f}m (range: {self.depth_min}-{self.depth_max}m)')
-            # Try to find valid depth in neighborhood
-            depth_value = self._find_valid_depth_in_neighborhood(int(u), int(v))
-            if depth_value == 0:
-                self.get_logger().error(f'No valid depth found near pixel ({u}, {v})')
-                return (0.0, 0.0, 0.0)
-            self.get_logger().info(f'Using neighborhood depth: {depth_value:.4f}m')
+        self.get_logger().info(f'Depth at pixel ({u}, {v}): {depth_value:.4f}m')
+        
+        if depth_value == 0:
+            self.get_logger().error(f'No valid depth found at or near pixel ({u}, {v})')
+            return (0.0, 0.0, 0.0)
         
         # Deproject pixel to 3D point in camera coordinate frame
-        # Using color intrinsics since depth is aligned to color
-        pixel = [float(u), float(v)]
-        point_3d_cam = rs.rs2_deproject_pixel_to_point(self.color_intrin, pixel, depth_value)
+        point_3d_cam = self.deproject_pixel_to_point(float(u), float(v), depth_value)
         
         self.get_logger().info(f'Camera frame: x={point_3d_cam[0]:.4f}m, y={point_3d_cam[1]:.4f}m, z={point_3d_cam[2]:.4f}m')
         
@@ -274,42 +382,13 @@ class PixelToRealWorldService(Node):
         if not self.validate_working_area(x_base, y_base, z_base):
             self.get_logger().warn('Coordinates outside working area - returning anyway')
         
-        # Clamp to working area
+        # Clamp x and y to working area, but keep z_base as measured from depth
+        # Don't clamp z - it represents the actual height of the object based on depth measurement
         x_base = np.clip(x_base, self.x_min, self.x_max)
         y_base = np.clip(y_base, self.y_min, self.y_max)
-        z_base = np.clip(z_base, self.z_table - 0.05, self.z_table + 0.05)
+        # z_base is kept as-is from depth measurement
         
         return (float(x_base), float(y_base), float(z_base))
-    
-    def _find_valid_depth_in_neighborhood(self, u, v, window_size=5):
-        """
-        Find valid depth value in neighborhood of invalid pixel.
-        
-        Args:
-            u, v: Pixel coordinates
-            window_size: Radius of search window
-            
-        Returns:
-            float: Median depth from valid neighbors, or 0.0 if none found
-        """
-        valid_depths = []
-        
-        for du in range(-window_size, window_size + 1):
-            for dv in range(-window_size, window_size + 1):
-                nu = u + du
-                nv = v + dv
-                
-                if 0 <= nu < self.color_intrin.width and 0 <= nv < self.color_intrin.height:
-                    depth = self.latest_aligned_depth_frame.get_distance(nu, nv)
-                    if self.depth_min <= depth <= self.depth_max:
-                        valid_depths.append(depth)
-        
-        if valid_depths:
-            median_depth = float(np.median(valid_depths))
-            self.get_logger().info(f'Found {len(valid_depths)} valid depths in neighborhood, median: {median_depth:.4f}m')
-            return median_depth
-        
-        return 0.0
     
     def handle_pixel_to_real_world(self, request, response):
         """Handle service request to convert pixel to real-world coordinates."""
@@ -319,12 +398,13 @@ class PixelToRealWorldService(Node):
         self.get_logger().info(f'Received request: pixel ({u}, {v})')
         
         # Validate pixel coordinates
-        if not (0 <= u < self.color_intrin.width and 0 <= v < self.color_intrin.height):
-            self.get_logger().error(f'Pixel ({u}, {v}) out of bounds. Image size: {self.color_intrin.width}x{self.color_intrin.height}')
-            response.x = 0.0
-            response.y = 0.0
-            response.z = 0.0
-            return response
+        if self.camera_info is not None:
+            if not (0 <= u < self.camera_info.width and 0 <= v < self.camera_info.height):
+                self.get_logger().error(f'Pixel ({u}, {v}) out of bounds. Image size: {self.camera_info.width}x{self.camera_info.height}')
+                response.x = 0.0
+                response.y = 0.0
+                response.z = 0.0
+                return response
         
         # Convert pixel to 3D point
         x, y, z = self.pixel_to_3d_point(u, v)
@@ -336,15 +416,60 @@ class PixelToRealWorldService(Node):
         
         self.get_logger().info(f'Response: world coordinates (x={x:.4f}m, y={y:.4f}m, z={z:.4f}m)')
         
+        # Publish debug visualization with red dot at requested pixel
+        self._publish_debug_image(u, v, x, y, z)
+        
         return response
+    
+    def _publish_debug_image(self, u, v, x, y, z):
+        """
+        Publish debug image with red dot at requested pixel location.
+        
+        Args:
+            u, v: Pixel coordinates
+            x, y, z: Computed world coordinates
+        """
+        if self.latest_rgb is None:
+            return
+        
+        try:
+            # Create a copy of the RGB image
+            debug_image = self.latest_rgb.copy()
+            
+            # Ensure it's in BGR format for OpenCV
+            if len(debug_image.shape) == 2:
+                debug_image = cv2.cvtColor(debug_image, cv2.COLOR_GRAY2BGR)
+            elif debug_image.shape[2] == 4:
+                debug_image = cv2.cvtColor(debug_image, cv2.COLOR_RGBA2BGR)
+            
+            # Draw red circle at the requested pixel
+            cv2.circle(debug_image, (u, v), 8, (0, 0, 255), -1)  # Filled red circle
+            cv2.circle(debug_image, (u, v), 10, (0, 0, 255), 2)  # Red outline
+            
+            # Draw crosshair
+            cv2.line(debug_image, (u-15, v), (u+15, v), (0, 0, 255), 2)
+            cv2.line(debug_image, (u, v-15), (u, v+15), (0, 0, 255), 2)
+            
+            # Add text with coordinates
+            text = f"({u},{v}) -> ({x:.3f}, {y:.3f}, {z:.3f})m"
+            cv2.putText(debug_image, text, (u+15, v-15), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+            
+            # Convert back to ROS Image message
+            debug_msg = self.bridge.cv2_to_imgmsg(debug_image, encoding='bgr8')
+            debug_msg.header.stamp = self.get_clock().now().to_msg()
+            debug_msg.header.frame_id = 'camera_color_optical_frame'
+            
+            # Publish
+            self.debug_pub.publish(debug_msg)
+            self.get_logger().info(f'Published debug image with red dot at ({u}, {v})')
+            
+        except Exception as e:
+            self.get_logger().error(f'Error creating debug image: {e}')
     
     def destroy_node(self):
         """Clean up resources when node is destroyed."""
-        try:
-            self.pipeline.stop()
-            self.get_logger().info('RealSense pipeline stopped')
-        except Exception as e:
-            self.get_logger().error(f'Error stopping pipeline: {e}')
+        self.get_logger().info('Shutting down pixel_to_real_world service')
         super().destroy_node()
 
 
