@@ -364,13 +364,6 @@ class PixelToRealServer(Node):
 
 
 
-
-        else:
-            d = bilinear(u, v)
-            self.get_logger().info(f'Read depth at ({u},{v}): {d if d is not None else "invalid"} (simulated mode)')
-        if d is not None:
-            return d
-
         # Fallback: collect valid depths in neighborhood and take median
         valid_depths = []
         for du in range(-max_search, max_search + 1):
