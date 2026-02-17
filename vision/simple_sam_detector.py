@@ -679,11 +679,12 @@ class SimpleSAMDetector(Node):
         
         # Relaxed filter parameters (was too strict before)
         min_area = (w * h) * 0.0005  # Reduced from 0.001 (0.05% instead of 0.1%)
-        max_area = (w * h) * 0.9     # Increased from 0.8 (90% instead of 80%)
+        # FIX: Reduced max_area from 0.9 (90%) to 0.35 (35%) to filter out large regions
+        # like arms/hands that enter the scene during robot movement
+        max_area = (w * h) * 0.35    # 35% of image - filters out large objects (arms, hands)
         min_box_size = 15            # Reduced from 20 to catch smaller objects
         
-        detections = []
-        seen_boxes = []  # Track similar boxes to avoid duplicates
+        self.get_logger().info(f"Area filtering: min={min_area:.0f} px, max={max_area:.0f} px ({0.35*100:.0f}% of image)")
         
         detections = []
         seen_boxes = []  # Track similar boxes to avoid duplicates
