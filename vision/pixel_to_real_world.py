@@ -395,6 +395,10 @@ class PixelToRealWorldService(Node):
         
         # Convert pixel to 3D point
         x, y, z = self.pixel_to_3d_point(u, v)
+
+        # Invert axis to match robot's coordinate system
+        x = -x
+        y = -y 
         
         # Fill response
         response.x = x
