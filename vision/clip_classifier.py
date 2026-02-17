@@ -696,6 +696,11 @@ class CLIPClassifier(Node):
                 self.get_logger().error("CLIP model not available")
                 return response
             
+            # FIX: Clear cached classifications to force fresh detection every time
+            # This ensures find -> move -> find gets updated scene data
+            self.get_logger().info("Clearing cached region classifications to force fresh detection")
+            self.latest_region_classifications = []
+            
             # Check if we have classified regions from SAM, if not, get detections
             if not self.latest_region_classifications:
                 self.get_logger().info("No SAM detections available. Calling /vision/detect_objects automatically...")
