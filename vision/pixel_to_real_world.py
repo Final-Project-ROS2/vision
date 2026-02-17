@@ -6,7 +6,7 @@ ROS2 RealSense Pixel-to-Real-World Service Node
 This node provides a ROS2 service to convert pixel coordinates (u, v) to real-world 
 3D coordinates (x, y, z) using Intel RealSense depth camera with proper coordinate transformation.
 
-Service: /pixel_to_real_world
+Service: /pixel_to_real
 Type: custom_interfaces/srv/PixelToReal
 
 Coordinate System:
@@ -104,11 +104,11 @@ class PixelToRealWorldService(Node):
         if PixelToReal is not None:
             self.srv = self.create_service(
                 PixelToReal,
-                'pixel_to_real_world',
-                self.handle_pixel_to_real_world
+                '/pixel_to_real',
+                self.handle_pixel_to_real
             )
-            self.get_logger().info('Service /pixel_to_real_world is ready')
-            self.get_logger().info('Usage: ros2 service call /pixel_to_real_world custom_interfaces/srv/PixelToReal "{u: 320, v: 240}"')
+            self.get_logger().info('Service /pixel_to_real is ready')
+            self.get_logger().info('Usage: ros2 service call /pixel_to_real custom_interfaces/srv/PixelToReal "{u: 320, v: 240}"')
         else:
             self.get_logger().error('PixelToReal service type not available. Build custom_interfaces package.')
             raise RuntimeError('custom_interfaces.srv.PixelToReal not available')
@@ -377,7 +377,7 @@ class PixelToRealWorldService(Node):
         
         return (float(x_base), float(y_base), float(z_base))
     
-    def handle_pixel_to_real_world(self, request, response):
+    def handle_pixel_to_real(self, request, response):
         """Handle service request to convert pixel to real-world coordinates."""
         u = int(request.u)
         v = int(request.v)
@@ -456,7 +456,7 @@ class PixelToRealWorldService(Node):
     
     def destroy_node(self):
         """Clean up resources when node is destroyed."""
-        self.get_logger().info('Shutting down pixel_to_real_world service')
+        self.get_logger().info('Shutting down /pixel_to_real service')
         super().destroy_node()
 
 
