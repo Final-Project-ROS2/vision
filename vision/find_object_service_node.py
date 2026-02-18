@@ -14,12 +14,16 @@ ros2 service call /find_object custom_interfaces/srv/FindObjectReal "{label: 'bo
 confidence calculate by SAM detection based
 """
 
-
+TCP_OFFSET = 0.1
 
 
 class FindObjectServiceNode(Node):
     def __init__(self):
         super().__init__('find_object_service_node')
+
+        # Parameter toggles tcp offset
+        self.declare_parameter('tcp_offset', False)
+        self.tcp_offset = bool(self.get_parameter('tcp_offset').value)
         
         # Use reentrant callback group to allow nested service calls
         self.callback_group = ReentrantCallbackGroup()
@@ -187,7 +191,10 @@ class FindObjectServiceNode(Node):
             response.confidence = find_response.confidence
             response.x = pixel_response.x
             response.y = pixel_response.y
-            response.z = pixel_response.z
+            if self.tcp_offset:
+                response.z = pixel_response.z + TCP_OFFSET
+            else:
+                response.z = pixel_response.z
             
             self.get_logger().info(f'Success! Object {object_id} at world coordinates: ({pixel_response.x:.3f}, {pixel_response.y:.3f}, {pixel_response.z:.3f})')
             
