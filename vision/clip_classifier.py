@@ -42,6 +42,8 @@ Workflow:
 
 import rclpy
 from rclpy.node import Node
+from rclpy.callback_groups import ReentrantCallbackGroup
+from rclpy.executors import MultiThreadedExecutor
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy
 from sensor_msgs.msg import Image
 from std_srvs.srv import Trigger
@@ -103,6 +105,9 @@ class CLIPClassifier(Node):
     def __init__(self, candidate_labels: List[str] = None):
         super().__init__('clip_classifier')
         
+        # Create reentrant callback group for nested service calls
+        self.callback_group = ReentrantCallbackGroup()
+        
         # Parameter toggles camera topics between simulation and hardware
         self.declare_parameter('real_hardware', False)
         self.real_hardware = bool(self.get_parameter('real_hardware').value)
@@ -115,8 +120,11 @@ class CLIPClassifier(Node):
         # Default labels if none provided
         self.candidate_labels = candidate_labels or [
             # "cobot",
-            # "green_cube",
-            # "drill",
+            "green_cube",
+            "drill",
+            "pink_cube",
+            "measuring_tape",
+            "screwdriver",
             # "gear",
             # "monkey_wrench",
             # "piston_rod",
@@ -126,7 +134,6 @@ class CLIPClassifier(Node):
             # "door_handle",
             # "red_ball",
             # "gasket_part",
-
             "beer_can",
             "bowl",
             "cinder_block",
@@ -202,20 +209,23 @@ class CLIPClassifier(Node):
         self.classification_all_service = self.create_service(
             Trigger,
             '/vision/classify_all',
-            self.classify_all_callback
+            self.classify_all_callback,
+            callback_group=self.callback_group
         )
         
         if CUSTOM_INTERFACES_AVAILABLE:
             self.classification_bb_service = self.create_service(
                 ClassifyBBox,
                 '/vision/classify_bb',
-                self.classify_bb_callback
+                self.classify_bb_callback,
+                callback_group=self.callback_group
             )
         else:
             self.classification_bb_service = self.create_service(
                 Trigger,
                 '/vision/classify_bb',
-                self.classify_bb_callback_fallback
+                self.classify_bb_callback_fallback,
+                callback_group=self.callback_group
             )
         
         # Find object by label service
@@ -225,7 +235,8 @@ class CLIPClassifier(Node):
                 self.find_object_service = self.create_service(
                     FindObject,
                     '/vision/find_object',
-                    self.find_object_callback
+                    self.find_object_callback,
+                    callback_group=self.callback_group
                 )
                 self.get_logger().info("Service created: /vision/find_object")
             except ImportError:
@@ -235,7 +246,8 @@ class CLIPClassifier(Node):
         self.classify_filtered_service = self.create_service(
             Trigger,
             '/vision/classify_bbox_filtered',
-            self.classify_bbox_filtered_callback
+            self.classify_bbox_filtered_callback,
+            callback_group=self.callback_group
         )
         
         # Subscribe to live SAM detections for auto-classification
@@ -307,11 +319,12 @@ class CLIPClassifier(Node):
             self.latest_rgb = self.bridge.imgmsg_to_cv2(msg, desired_encoding=self.desired_encoding)
             self.frame_counter += 1
             
-            # Capture first frame for classification
+            # Always update captured frame to get fresh data for classification
+            # (Fixed: was only capturing first frame, now updates continuously)
+            self.captured_frame = self.latest_rgb.copy()
             if not self.frame_captured:
-                self.captured_frame = self.latest_rgb.copy()
                 self.frame_captured = True
-                self.get_logger().info(f"Captured frame {self.frame_counter} for classification")
+                self.get_logger().info(f"First frame captured from {self.rgb_topic}")
                 
         except Exception as e:
             self.get_logger().error(f"Failed to convert image: {e}")
@@ -696,6 +709,11 @@ class CLIPClassifier(Node):
                 self.get_logger().error("CLIP model not available")
                 return response
             
+            # FIX: Clear cached classifications to force fresh detection every time
+            # This ensures find -> move -> find gets updated scene data
+            self.get_logger().info("Clearing cached region classifications to force fresh detection")
+            self.latest_region_classifications = []
+            
             # Check if we have classified regions from SAM, if not, get detections
             if not self.latest_region_classifications:
                 self.get_logger().info("No SAM detections available. Calling /vision/detect_objects automatically...")
@@ -711,7 +729,11 @@ class CLIPClassifier(Node):
                     self.get_logger().error("DetectObjects interface not found")
                     return response
                 
-                detect_client = self.create_client(DetectObjects, '/vision/detect_objects')
+                detect_client = self.create_client(
+                    DetectObjects, 
+                    '/vision/detect_objects',
+                    callback_group=self.callback_group
+                )
                 
                 # Wait for service to be available (timeout 5 seconds)
                 if not detect_client.wait_for_service(timeout_sec=5.0):
@@ -722,25 +744,9 @@ class CLIPClassifier(Node):
                     self.get_logger().error("Detection service not available")
                     return response
                 
-                # Call the detection service
+                # Call the detection service synchronously
                 detect_request = DetectObjects.Request()
-                detect_future = detect_client.call_async(detect_request)
-                
-                # Wait for the detection to complete (timeout 100 seconds)
-                timeout = 100.0
-                start_time = time.time()
-                while not detect_future.done():
-                    if time.time() - start_time > timeout:
-                        response.success = False
-                        response.message = "Timeout waiting for object detection to complete"
-                        response.bbox = []
-                        response.confidence = 0.0
-                        self.get_logger().error("Detection timeout")
-                        return response
-                    rclpy.spin_once(self, timeout_sec=0.1)
-                
-                # Get detection result
-                detect_response = detect_future.result()
+                detect_response = detect_client.call(detect_request)
                 if not detect_response.success:
                     response.success = False
                     response.message = f"Object detection failed: {detect_response.error_message}"
@@ -1068,7 +1074,10 @@ class CLIPClassifier(Node):
     
     def visualization_callback(self):
         """Display camera feed with classification in OpenCV window"""
-        if self.captured_frame is None:
+        # Use latest_rgb for real-time display, fallback to captured_frame
+        frame_to_display = self.latest_rgb if self.latest_rgb is not None else self.captured_frame
+        
+        if frame_to_display is None:
             # Show waiting message
             blank = np.zeros((480, 640, 3), dtype=np.uint8)
             cv2.putText(
@@ -1084,8 +1093,8 @@ class CLIPClassifier(Node):
             cv2.waitKey(1)
             return
         
-        # Create visualization image from captured frame
-        vis_image = self.captured_frame.copy()
+        # Create visualization image from latest live frame
+        vis_image = frame_to_display.copy()
         h, w = vis_image.shape[:2]
         
         # Check if we have region classifications (from SAM auto-classification)
@@ -1328,7 +1337,16 @@ def main(args=None):
     
     try:
         node = CLIPClassifier(candidate_labels=candidate_labels)
-        rclpy.spin(node)
+        
+        # Use MultiThreadedExecutor for ReentrantCallbackGroup
+        executor = MultiThreadedExecutor()
+        executor.add_node(node)
+        
+        try:
+            executor.spin()
+        finally:
+            executor.shutdown()
+            node.destroy_node()
     except KeyboardInterrupt:
         pass
     finally:

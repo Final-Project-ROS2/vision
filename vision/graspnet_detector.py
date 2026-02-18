@@ -301,12 +301,14 @@ class GraspNetDetector(Node):
             self.latest_rgb = self.bridge.imgmsg_to_cv2(msg, desired_encoding=self.desired_encoding)
             self.frame_counter += 1
             
-            # Capture first frame
-            if not self.frame_captured and self.latest_depth is not None:
+            # Always update captured frame to get fresh data for detection
+            # (Fixed: was only capturing first frame, now updates continuously)
+            if self.latest_depth is not None:
                 self.captured_rgb = self.latest_rgb.copy()
                 self.captured_depth = self.latest_depth.copy()
+            if not self.frame_captured and self.latest_depth is not None:
                 self.frame_captured = True
-                self.get_logger().info(f"Captured RGB-D frame {self.frame_counter}")
+                self.get_logger().info(f"First RGB-D frame captured")
         except Exception as e:
             self.get_logger().error(f"Failed to convert RGB image: {e}")
     
@@ -317,12 +319,14 @@ class GraspNetDetector(Node):
             # Clean up depth data
             self.latest_depth = np.nan_to_num(self.latest_depth, nan=0.0, posinf=0.0, neginf=0.0)
             
-            # Capture first frame if RGB is available
-            if not self.frame_captured and self.latest_rgb is not None:
+            # Always update captured frame to get fresh data for detection
+            # (Fixed: was only capturing first frame, now updates continuously)
+            if self.latest_rgb is not None:
                 self.captured_rgb = self.latest_rgb.copy()
                 self.captured_depth = self.latest_depth.copy()
+            if not self.frame_captured and self.latest_rgb is not None:
                 self.frame_captured = True
-                self.get_logger().info(f"Captured RGB-D frame {self.frame_counter}")
+                self.get_logger().info(f"First RGB-D frame captured")
         except Exception as e:
             self.get_logger().error(f"Failed to convert depth image: {e}")
     
@@ -1016,7 +1020,10 @@ class GraspNetDetector(Node):
     def visualization_callback(self):
         """Display current RGB image with grasps"""
         try:
-            if self.latest_rgb is None:
+            # Use latest_rgb for real-time display, fallback to captured_rgb
+            frame_to_display = self.latest_rgb if self.latest_rgb is not None else self.captured_rgb
+            
+            if frame_to_display is None:
                 blank = np.zeros((480, 640, 3), dtype=np.uint8)
                 cv2.putText(blank, "Waiting for camera...", (100, 240),
                            cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2)
@@ -1027,8 +1034,8 @@ class GraspNetDetector(Node):
                     pass
                 return
             
-            # Use captured frame for visualization
-            display_img = self.captured_rgb.copy() if self.captured_rgb is not None else self.latest_rgb.copy()
+            # Use real-time frame for visualization
+            display_img = frame_to_display.copy()
             
             # Check if we have region grasps (from SAM pipeline or bbox detection)
             if self.latest_region_grasps:
