@@ -25,6 +25,7 @@ from rclpy.callback_groups import ReentrantCallbackGroup
 from std_srvs.srv import Trigger
 from std_msgs.msg import String
 import json
+import numpy as np
 import time
 from datetime import datetime
 from http.server import HTTPServer, SimpleHTTPRequestHandler
@@ -45,6 +46,18 @@ except ImportError:
     print("Custom interfaces not available. Build custom_interfaces package first.")
 
 
+class NpEncoder(json.JSONEncoder):
+    """Custom JSON encoder to handle NumPy and ROS2 integer types"""
+    def default(self, obj):
+        if isinstance(obj, np.integer):
+            return int(obj)
+        if isinstance(obj, np.floating):
+            return float(obj)
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        return super(NpEncoder, self).default(obj)
+
+
 class BenchmarkDashboard(Node):
     """
     Benchmark Dashboard - Monitors vision services and provides web interface
@@ -63,6 +76,11 @@ class BenchmarkDashboard(Node):
             'clip_classifications': [],
             'grasp_detections': [],
             'scene_understanding': [],
+            'benchmark_metrics': {
+                'sam': {},
+                'clip': {},
+                'graspnet': {}
+            },
             'metadata': {
                 'start_time': datetime.now().isoformat(),
                 'total_calls': 0
@@ -100,20 +118,28 @@ class BenchmarkDashboard(Node):
                 '/vision/understand_scene',
                 callback_group=self.callback_group
             )
+            
+            # Subscriber to SAM detections topic for automatic monitoring
+            self.sam_sub = self.create_subscription(
+                SAMDetections,
+                '/vision/sam_detections',
+                self.sam_detections_callback,
+                10
+            )
+            
+            # Subscriber to scene understanding topic
+            self.scene_sub = self.create_subscription(
+                SceneUnderstanding,
+                '/vision/scene_understanding',
+                self.scene_understanding_callback,
+                10
+            )
         
-        # Subscriber to SAM detections topic for automatic monitoring
-        self.sam_sub = self.create_subscription(
-            SAMDetections,
-            '/vision/sam_detections',
-            self.sam_detections_callback,
-            10
-        )
-        
-        # Subscriber to scene understanding topic
-        self.scene_sub = self.create_subscription(
-            SceneUnderstanding,
-            '/vision/scene_understanding',
-            self.scene_understanding_callback,
+        # Subscriber to benchmark results (always available - uses String)
+        self.benchmark_results_sub = self.create_subscription(
+            String,
+            '/benchmark/results',
+            self.benchmark_results_callback,
             10
         )
         
@@ -299,10 +325,35 @@ class BenchmarkDashboard(Node):
         
         self.data['metadata']['total_calls'] += 1
     
+    def benchmark_results_callback(self, msg):
+        """Handle incoming benchmark results from benchmark_runner"""
+        try:
+            results = json.loads(msg.data)
+            
+            # Store benchmark metrics
+            if 'sam' in results:
+                self.data['benchmark_metrics']['sam'] = results['sam']
+            if 'clip' in results:
+                self.data['benchmark_metrics']['clip'] = results['clip']
+            if 'graspnet' in results:
+                self.data['benchmark_metrics']['graspnet'] = results['graspnet']
+            
+            # Store metadata
+            if 'metadata' in results:
+                self.data['benchmark_metrics']['metadata'] = results['metadata']
+            
+            self.get_logger().info('Received benchmark results')
+            self.get_logger().info(f'  SAM tests: {len(self.data["benchmark_metrics"]["sam"])}')
+            self.get_logger().info(f'  CLIP tests: {len(self.data["benchmark_metrics"]["clip"])}')
+            self.get_logger().info(f'  GraspNet tests: {len(self.data["benchmark_metrics"]["graspnet"])}')
+            
+        except Exception as e:
+            self.get_logger().error(f'Failed to parse benchmark results: {e}')
+    
     def publish_data(self):
         """Publish benchmark data to topic"""
         msg = String()
-        msg.data = json.dumps(self.data)
+        msg.data = json.dumps(self.data, cls=NpEncoder)
         self.data_publisher.publish(msg)
     
     def clear_data_callback(self, request, response):
@@ -313,6 +364,11 @@ class BenchmarkDashboard(Node):
             'clip_classifications': [],
             'grasp_detections': [],
             'scene_understanding': [],
+            'benchmark_metrics': {
+                'sam': {},
+                'clip': {},
+                'graspnet': {}
+            },
             'metadata': {
                 'start_time': datetime.now().isoformat(),
                 'total_calls': 0

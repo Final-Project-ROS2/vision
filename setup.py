@@ -70,7 +70,7 @@ setup(
             'pixel_to_real_world_service = vision.pixel_to_real_world:main',
             'real_cam_info = vision.real_cam_info:main',
             # 'calibrate = calibration.calibrate:main',
-            # 'benchmark_dashboard = vision.benchmark_dashboard:main',
+            'benchmark_dashboard = vision.benchmark_dashboard:main',
             # 'show_rgb_image = vision.show_rgb_image_node:main',
             # 'show_depth_image = vision.show_depth_image_node:main',
             # 'sam_vision_pipeline = vision.sam_vision_pipeline_node:main',
