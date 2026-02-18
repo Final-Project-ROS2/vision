@@ -115,8 +115,9 @@ class CLIPClassifier(Node):
         # Default labels if none provided
         self.candidate_labels = candidate_labels or [
             # "cobot",
-            # "green_cube",
-            # "drill",
+            "green_cube",
+            "drill",
+            "pink_cube",
             # "gear",
             # "monkey_wrench",
             # "piston_rod",
@@ -307,11 +308,12 @@ class CLIPClassifier(Node):
             self.latest_rgb = self.bridge.imgmsg_to_cv2(msg, desired_encoding=self.desired_encoding)
             self.frame_counter += 1
             
-            # Capture first frame for classification
+            # Always update captured frame to get fresh data for classification
+            # (Fixed: was only capturing first frame, now updates continuously)
+            self.captured_frame = self.latest_rgb.copy()
             if not self.frame_captured:
-                self.captured_frame = self.latest_rgb.copy()
                 self.frame_captured = True
-                self.get_logger().info(f"Captured frame {self.frame_counter} for classification")
+                self.get_logger().info(f"First frame captured from {self.rgb_topic}")
                 
         except Exception as e:
             self.get_logger().error(f"Failed to convert image: {e}")
@@ -1073,7 +1075,10 @@ class CLIPClassifier(Node):
     
     def visualization_callback(self):
         """Display camera feed with classification in OpenCV window"""
-        if self.captured_frame is None:
+        # Use latest_rgb for real-time display, fallback to captured_frame
+        frame_to_display = self.latest_rgb if self.latest_rgb is not None else self.captured_frame
+        
+        if frame_to_display is None:
             # Show waiting message
             blank = np.zeros((480, 640, 3), dtype=np.uint8)
             cv2.putText(
@@ -1089,8 +1094,8 @@ class CLIPClassifier(Node):
             cv2.waitKey(1)
             return
         
-        # Create visualization image from captured frame
-        vis_image = self.captured_frame.copy()
+        # Create visualization image from latest live frame
+        vis_image = frame_to_display.copy()
         h, w = vis_image.shape[:2]
         
         # Check if we have region classifications (from SAM auto-classification)
