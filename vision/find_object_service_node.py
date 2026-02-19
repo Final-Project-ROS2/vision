@@ -14,7 +14,7 @@ ros2 service call /find_object custom_interfaces/srv/FindObjectReal "{label: 'bo
 confidence calculate by SAM detection based
 """
 
-TCP_OFFSET = 0.1
+TCP_OFFSET = 0.1265
 
 
 class FindObjectServiceNode(Node):
