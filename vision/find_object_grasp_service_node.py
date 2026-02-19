@@ -6,7 +6,7 @@ from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from custom_interfaces.srv import FindObjectGrasp, FindObjectReal, DetectGraspBBox
 
-TCP_OFFSET = 0.1265
+TCP_OFFSET = 0.157
 
 class FindObjectGraspServiceNode(Node):
     def __init__(self):
