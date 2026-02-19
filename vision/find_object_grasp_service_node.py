@@ -6,10 +6,15 @@ from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from custom_interfaces.srv import FindObjectGrasp, FindObjectReal, DetectGraspBBox
 
+TCP_OFFSET = 0.1
 
 class FindObjectGraspServiceNode(Node):
     def __init__(self):
         super().__init__('find_object_grasp_service_node')
+
+        # Parameter toggles tcp offset
+        self.declare_parameter('tcp_offset', False)
+        self.tcp_offset = bool(self.get_parameter('tcp_offset').value)
         
         # Use reentrant callback group to allow nested service calls
         self.callback_group = ReentrantCallbackGroup()
@@ -88,6 +93,8 @@ class FindObjectGraspServiceNode(Node):
                 return response
 
             response.success = True
+            if self.tcp_offset:
+                detect_grasp_bbox_response.grasp_pose.position.z += TCP_OFFSET
             response.grasp_pose = detect_grasp_bbox_response.grasp_pose
             response.error_message = ''
             
