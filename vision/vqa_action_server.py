@@ -261,6 +261,8 @@ class VQAActionServer(Node):
 
         final_msg = text
 
+        self.get_logger().info(f"Final response: {final_msg}")
+
         return self._build_result(True, final_msg)
 
     # ------------------------------------------------------------------
