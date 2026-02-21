@@ -25,12 +25,13 @@ Usage example:
   ros2 action send_goal /vqa custom_interfaces/action/Prompt "{prompt: 'What objects are visible?'}"
 
 Parameters:
-  - real_hardware (bool): switch camera topics between hardware and sim (default: false)
-  - vlm_model (string): Ollama model name to query (default: qwen3-vl:8b)
-  - ollama_host (string): Base URL for Ollama HTTP API (default: http://localhost:11434)
-  - image_timeout_sec (double): max allowed age of the cached frame in seconds (default: 2.0)
-  - system_prompt (string): system prompt to guide model behavior (default: concise answering)
-  - include_metadata (bool): include model name and timing in response (default: false)
+    - real_hardware (bool): switch camera topics between hardware and sim (default: false)
+    - vlm_model (string): Ollama model name to query (default: qwen3-vl:8b)
+    - ollama_host (string): Base URL for Ollama HTTP API (default: http://localhost:11434)
+    - image_timeout_sec (double): max allowed age of the cached frame in seconds (default: 2.0)
+    - system_prompt (string): system prompt to guide model behavior (default: concise answering)
+    - include_metadata (bool): include model name and timing in response (default: false)
+    - image_reliability (string): image QoS reliability ('best_effort' or 'reliable', default: best_effort)
 """
 
 import base64
@@ -70,12 +71,25 @@ class VQAActionServer(Node):
 
         # Parameters
         self.declare_parameter('real_hardware', False)
+        self.declare_parameter('image_reliability', 'best_effort')
 
         self.real_hardware = bool(self.get_parameter('real_hardware').value)
+        reliability_param = str(self.get_parameter('image_reliability').value).lower()
+        if reliability_param == 'reliable':
+            reliability = QoSReliabilityPolicy.RELIABLE
+        elif reliability_param in ('best_effort', 'besteffort', 'best-effort'):
+            reliability = QoSReliabilityPolicy.BEST_EFFORT
+        else:
+            self.get_logger().warn(
+                f"Unknown image_reliability '{reliability_param}', defaulting to best_effort."
+            )
+            reliability = QoSReliabilityPolicy.BEST_EFFORT
+
         self.model_name = MODEL_NAME
         self.ollama_host = OLLAMA_HOST
         self.image_timeout = IMAGE_TIMEOUT
         self.system_prompt = SYSTEM_PROMPT
+        self.image_reliability = reliability
 
         # Camera topics
         if self.real_hardware:
@@ -87,9 +101,9 @@ class VQAActionServer(Node):
 
         # QoS profile
         self.image_qos = QoSProfile(
-            reliability=QoSReliabilityPolicy.BEST_EFFORT,
+            reliability=self.image_reliability,
             history=QoSHistoryPolicy.KEEP_LAST,
-            depth=1,
+            depth=5,
         )
 
         # State
@@ -124,6 +138,7 @@ class VQAActionServer(Node):
         self.get_logger().info(f"  Topic: {self.rgb_topic}")
         self.get_logger().info(f"  Model: {self.model_name}")
         self.get_logger().info(f"  Ollama API: {self.ollama_host}")
+        self.get_logger().info(f"  Image QoS reliability: {self.image_reliability.name}")
         self.get_logger().info('  Action: /vqa (custom_interfaces/action/Prompt)')
         self.get_logger().info('=' * 80)
 
