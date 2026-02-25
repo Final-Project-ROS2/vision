@@ -279,13 +279,10 @@ class PixelToRealWorldService(Node):
         v = getattr(self, '_last_v', 240)
         
         # Apply empirical calibration corrections based on pixel position
-        # Y-axis correction: Linear model based on v-coordinate
-        # y_error = -0.00116 * v + 0.164
-        y_correction = -0.00345 * v + 0.73055
-        
-        # X-axis correction: Linear model based on u-coordinate  
-        # x_error = -0.000194 * u + 0.042
-        x_correction = -0.000194 * u + 0.042
+        # Updated 2026-02-25 using latest ground-truth pairs (u,v)->(x,y)
+        # to minimize residual error in base frame outputs.
+        y_correction = -0.00265 * v + 0.61800
+        x_correction = -0.00060 * u + 0.22500
         
         # Apply corrections
         x_base = x_base_raw - x_correction
