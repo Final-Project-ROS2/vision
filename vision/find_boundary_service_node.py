@@ -23,7 +23,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
-from custom_interfaces.srv import DetectObjects, FindObject, PixelToReal
+from custom_interfaces.srv import DetectObjects, FindObject, PixelToReal, FindBoundary
 
 class FindBoundaryServiceNode(Node):
     def __init__(self):
@@ -100,7 +100,9 @@ class FindBoundaryServiceNode(Node):
                 response.y2 = 0.0
                 return response
             object_id = getattr(find_response, 'object_id', '')
-            bbox = find_response.bbox
+            # Normalize bbox to a plain Python list of floats so it matches the
+            # FindBoundary response field type (float64[] instead of array('f')).
+            bbox = [float(v) for v in find_response.bbox]
             if len(bbox) < 4:
                 response.success = False
                 response.message = 'Invalid bounding box returned'
