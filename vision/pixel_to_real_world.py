@@ -15,7 +15,6 @@ class PixelToRealNode(Node):
     def __init__(self):
         super().__init__("pixel_to_real_node")
 
-        # Subscribers
         self.depth_sub = self.create_subscription(
             Image,
             "/camera/depth/image_rect_raw",
@@ -30,7 +29,6 @@ class PixelToRealNode(Node):
             10
         )
 
-        # Service
         self.service = self.create_service(
             PixelToReal,
             "/pixel_to_real",
@@ -41,69 +39,84 @@ class PixelToRealNode(Node):
         self.cam_model = PinholeCameraModel()
 
         self.depth_image = None
-        self.depth_scale = 0.001  # Typical for RealSense (mm → m)
         self.camera_ready = False
 
-        self.get_logger().info("PixelToReal service ready.")
+        # ---- DEPTH SCALE ----
+        self.depth_scale = 0.001  # mm to meters
 
-    # ---------------------------
-    # Callbacks
-    # ---------------------------
+        # ---- Camera Pose in base_link ----
+        self.t_base_cam = np.array([0.0, -0.5442, 0.6711])
 
-    def depth_callback(self, msg: Image):
-        self.depth_image = self.bridge.imgmsg_to_cv2(msg, desired_encoding="16UC1")
+        self.R_base_cam = np.array([
+            [1.0,  0.0,  0.0],
+            [0.0, -1.0,  0.0],
+            [0.0,  0.0, -1.0]
+        ])
 
-    def info_callback(self, msg: CameraInfo):
+        self.get_logger().info("PixelToReal with TF ready.")
+
+    # --------------------------------------------------
+
+    def depth_callback(self, msg):
+        self.depth_image = self.bridge.imgmsg_to_cv2(msg, "16UC1")
+
+    def info_callback(self, msg):
         self.cam_model.fromCameraInfo(msg)
         self.camera_ready = True
 
-    # ---------------------------
-    # Service Handler
-    # ---------------------------
+    # --------------------------------------------------
+
+    def get_robust_depth(self, u, v, window_size=5):
+
+        h, w = self.depth_image.shape
+        half = window_size // 2
+
+        u_min = max(u - half, 0)
+        u_max = min(u + half + 1, w)
+        v_min = max(v - half, 0)
+        v_max = min(v + half + 1, h)
+
+        window = self.depth_image[v_min:v_max, u_min:u_max]
+        valid = window[window > 0]
+
+        if len(valid) == 0:
+            return None
+
+        return np.median(valid)
+
+    # --------------------------------------------------
 
     def handle_pixel_to_real(self, request, response):
 
         if self.depth_image is None or not self.camera_ready:
-            self.get_logger().warn("Depth or camera info not ready.")
-            response.x = 0.0
-            response.y = 0.0
-            response.z = 0.0
             return response
 
         u = request.u
         v = request.v
 
-        # Check bounds
-        height, width = self.depth_image.shape
-        if not (0 <= u < width and 0 <= v < height):
-            self.get_logger().warn("Pixel out of bounds.")
-            response.x = 0.0
-            response.y = 0.0
-            response.z = 0.0
+        depth_raw = self.get_robust_depth(u, v)
+
+        if depth_raw is None:
+            self.get_logger().warn("No valid depth.")
             return response
 
-        depth_raw = self.depth_image[v, u]
-
-        if depth_raw == 0:
-            self.get_logger().warn("Invalid depth value (0).")
-            response.x = 0.0
-            response.y = 0.0
-            response.z = 0.0
-            return response
-
-        # Convert depth to meters
         Z = float(depth_raw) * self.depth_scale
 
-        # Get normalized 3D ray
+        # Camera frame 3D
         ray = self.cam_model.projectPixelTo3dRay((u, v))
 
-        # Multiply ray by depth
-        X = ray[0] * Z
-        Y = ray[1] * Z
+        X_cam = ray[0] * Z
+        Y_cam = ray[1] * Z
+        Z_cam = Z
 
-        response.x = float(X)
-        response.y = float(Y)
-        response.z = float(Z)
+        p_cam = np.array([X_cam, Y_cam, Z_cam])
+
+        # Transform to base frame
+        p_base = self.R_base_cam @ p_cam + self.t_base_cam
+
+        response.x = float(p_base[0])
+        response.y = float(p_base[1])
+        response.z = float(p_base[2])
 
         return response
 
