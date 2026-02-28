@@ -49,7 +49,7 @@ class PixelToRealNode(Node):
 
         self.R_base_cam = np.array([
             [1.0,  0.0,  0.0],
-            [0.0, -1.0,  0.0],
+            [0.0, 1.0,  0.0],
             [0.0,  0.0, -1.0]
         ])
 
