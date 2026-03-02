@@ -54,7 +54,7 @@ class PixelToRealWorldService(Node):
         
         self.rgb_topic = '/camera/color/image_raw'
         self.depth_topic = '/camera/depth/image_rect_raw'
-        self.camera_info_topic = '/camera/depth/camera_info'  # Use depth camera_info
+        self.camera_info_topic = '/camera/color/camera_info'  # Use depth camera_info
         self.color_encoding = 'passthrough'
         self.depth_32_encoding = 'passthrough'
         self.depth_16_encoding = 'passthrough'
