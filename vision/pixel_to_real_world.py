@@ -45,7 +45,7 @@ class PixelToRealNode(Node):
         self.depth_scale = 0.001  # mm to meters
 
         # ---- Camera Pose in base_link ----
-        self.t_base_cam = np.array([-0.0339, 0.5442, 0.6711])
+        self.t_base_cam = np.array([0.0027, 0.5442, 0.6711])
 
         self.R_base_cam = np.array([
             [1.0,  0.0,  0.0],
