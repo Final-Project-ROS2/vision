@@ -71,6 +71,7 @@ setup(
             'real_cam_info = vision.real_cam_info:main',
             'vqa_action_server = vision.vqa_action_server:main',
             'find_boundary_service = vision.find_boundary_service_node:main',
+            'find_multi_object = vision.find_multi_object:main',
             # 'calibrate = calibration.calibrate:main',
             # 'benchmark_dashboard = vision.benchmark_dashboard:main',
             # 'show_rgb_image = vision.show_rgb_image_node:main',
