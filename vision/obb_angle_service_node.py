@@ -24,6 +24,7 @@ Key Features:
 - OpenCV visualization with OBB overlay
 - Angle parallel to WIDTH (longer dimension)
 - Angle range: -90° to 90° (-π/2 to π/2 radians)
+- Visualization: 0° arrow = VERTICAL (pointing UP)
 - Multi-threaded executor for non-blocking service calls
 
 Usage:
@@ -72,7 +73,7 @@ class OBBAngleServiceNode(Node):
         self.window_name = 'OBB Angle Detection'
         
         # Camera topic configuration (adjust based on hardware/simulation)
-        self.declare_parameter('real_hardware', False)
+        self.declare_parameter('real_hardware', True)
         self.real_hardware = self.get_parameter('real_hardware').value
         
         if self.real_hardware:
@@ -382,9 +383,9 @@ class OBBAngleServiceNode(Node):
             # Draw AABB first if provided (for single object mode)
             if bbox is not None and mode == "single":
                 x1, y1, x2, y2 = bbox
-                cv2.rectangle(vis_image, (int(x1), int(y1)), (int(x2), int(y2)), (128, 128, 128), 2)
-                cv2.putText(vis_image, "AABB (Input)", (int(x1), int(y1) - 5),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (128, 128, 128), 2)
+                cv2.rectangle(vis_image, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
+                cv2.putText(vis_image, "Input AABB", (int(x1), int(y1) - 5),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
             
             # Get OBB corner points
             box_points = self.get_obb_corner_points(u, v, theta, width, height)
@@ -400,10 +401,13 @@ class OBBAngleServiceNode(Node):
                 cv2.circle(vis_image, (int(u), int(v)), 6, (255, 255, 255), -1)
                 cv2.circle(vis_image, (int(u), int(v)), 8, color, 2)
             
-            # Draw angle arrow
-            arrow_length = max(width, height) / 3.0
-            end_x = int(u + arrow_length * np.cos(theta))
-            end_y = int(v + arrow_length * np.sin(theta))
+            # Draw angle arrow parallel to WIDTH (longer dimension), with -90° offset so 0° points UP
+            arrow_length = width / 2.5  # Use width (longer dimension) for arrow length
+            # Arrow points along the width direction (no rotation from theta)
+            # Then apply -90° offset for visualization so 0° = vertical
+            visual_theta = theta - np.pi / 2
+            end_x = int(u + arrow_length * np.cos(visual_theta))
+            end_y = int(v + arrow_length * np.sin(visual_theta))
             arrow_thickness = 3 if mode == "single" else 2
             cv2.arrowedLine(vis_image, (int(u), int(v)), (end_x, end_y), 
                           (255, 0, 255) if mode == "single" else color, 
@@ -413,21 +417,18 @@ class OBBAngleServiceNode(Node):
             angle_deg = np.rad2deg(theta)
             
             if mode == "single":
-                # Detailed info box for single object
+                # Concise info box for single object
                 info_lines = [
-                    f"Object: {object_id}",
-                    f"Center: ({int(u)}, {int(v)}) px",
-                    f"Angle: {angle_deg:.2f}deg",
-                    f"Theta: {theta:.4f} rad",
-                    f"Size: {width:.1f} x {height:.1f} px",
-                    f"Width: {width:.1f} px (angle || to this)",
-                    f"Height: {height:.1f} px"
+                    f"{object_id}",
+                    f"Center: ({int(u)}, {int(v)})",
+                    f"Angle: {angle_deg:.1f}deg",
+                    f"Size: {width:.0f}x{height:.0f}"
                 ]
                 
-                # Draw info box at top-right
-                font_scale = 0.7
+                # Draw compact info box at top-right
+                font_scale = 0.6
                 font_thickness = 2
-                line_spacing = 30
+                line_spacing = 25
                 
                 max_width = 0
                 for line in info_lines:
@@ -435,20 +436,23 @@ class OBBAngleServiceNode(Node):
                                                           font_scale, font_thickness)
                     max_width = max(max_width, text_w)
                 
-                box_height = len(info_lines) * line_spacing + 20
-                box_x = vis_image.shape[1] - max_width - 30
-                box_y = 20
+                box_height = len(info_lines) * line_spacing + 15
+                box_x = vis_image.shape[1] - max_width - 25
+                box_y = 15
                 
-                # Background
-                cv2.rectangle(vis_image, (box_x - 10, box_y - 10),
-                            (box_x + max_width + 10, box_y + box_height), (0, 0, 0), -1)
+                # Background with transparency effect
+                overlay = vis_image.copy()
+                cv2.rectangle(overlay, (box_x - 8, box_y - 8),
+                            (box_x + max_width + 8, box_y + box_height), (0, 0, 0), -1)
+                cv2.addWeighted(overlay, 0.7, vis_image, 0.3, 0, vis_image)
+                
                 # Border
-                cv2.rectangle(vis_image, (box_x - 10, box_y - 10),
-                            (box_x + max_width + 10, box_y + box_height), color, 3)
+                cv2.rectangle(vis_image, (box_x - 8, box_y - 8),
+                            (box_x + max_width + 8, box_y + box_height), color, 2)
                 
                 # Text lines
                 for i, line in enumerate(info_lines):
-                    y_pos = box_y + (i * line_spacing) + 20
+                    y_pos = box_y + (i * line_spacing) + 18
                     cv2.putText(vis_image, line, (box_x, y_pos),
                               cv2.FONT_HERSHEY_SIMPLEX, font_scale, color, font_thickness)
             else:
@@ -463,37 +467,31 @@ class OBBAngleServiceNode(Node):
                 cv2.putText(vis_image, label, (label_x, label_y),
                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
         
-        # Add title
+        # Add concise title
         if mode == "single":
-            title = "OBB Angle Detection - Single Object"
+            title = "OBB Detection"
         else:
-            title = f"OBB Angle Detection - {len(results)} Objects"
+            title = f"OBB Detection ({len(results)} objects)"
         
-        cv2.putText(vis_image, title, (10, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255, 255, 255), 3)
-        cv2.putText(vis_image, title, (10, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255, 255, 0), 2)
+        cv2.putText(vis_image, title, (10, 35), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 3)
+        cv2.putText(vis_image, title, (10, 35), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 255), 2)
         
-        # Add legend at bottom
-        legend_y = vis_image.shape[0] - 30
-        if mode == "single":
-            legend_text = "Angle Range: -90deg to +90deg | Width: Longer dimension (angle parallel to width)"
-        else:
-            legend_text = f"Total Objects: {len(results)} | Angle Range: -90deg to +90deg | Width: Longer dimension"
+        # Add concise legend at bottom
+        legend_y = vis_image.shape[0] - 20
+        legend_text = "0deg = Vertical | Range: -90deg to +90deg"
         
         cv2.putText(vis_image, legend_text, (10, legend_y),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
         
         # Display
         cv2.imshow(self.window_name, vis_image)
         cv2.waitKey(1)
         
-        # Debug logging
-        self.get_logger().info(f'Image displayed: shape={vis_image.shape}, dtype={vis_image.dtype}')
-        self.get_logger().info(f'Image min={vis_image.min()}, max={vis_image.max()}, mean={vis_image.mean():.1f}')
-        
+        # Concise logging
         if mode == "single":
-            self.get_logger().info(f'OBB visualization updated: 1 object')
+            self.get_logger().info(f'Visualization updated: 1 object')
         else:
-            self.get_logger().info(f'OBB visualization updated: {len(results)} objects')
+            self.get_logger().info(f'Visualization updated: {len(results)} objects')
     
     def trigger_real_time_detection(self):
         """
@@ -533,7 +531,7 @@ class OBBAngleServiceNode(Node):
     def find_object_angle_bb_callback(self, request, response):
         """
         Service callback for /obb/find_object_angle_bb
-        Calculate OBB for a single bounding box with visualization
+        Find object within the given AABB and calculate its OBB using mask detection
         """
         self.get_logger().info('=' * 80)
         self.get_logger().info(f'[/obb/find_object_angle_bb] Request received')
@@ -553,42 +551,101 @@ class OBBAngleServiceNode(Node):
                 self.get_logger().error('Invalid bounding box coordinates')
                 return response
             
-            # Trigger real-time detection for latest image
+            # Trigger real-time detection to get fresh detections
             self.get_logger().info('Triggering real-time detection...')
             detection_success = self.trigger_real_time_detection()
             
-            if detection_success:
-                self.get_logger().info('Detection successful, calculating OBB...')
-            else:
-                self.get_logger().info('Detection skipped, proceeding with OBB calculation...')
+            # Small delay to ensure detections are updated
+            time.sleep(0.1)
             
-            # Calculate OBB from AABB
-            u, v, theta, width, height = self.calculate_obb_from_bbox(
-                request.x1, request.y1, request.x2, request.y2
-            )
+            # Get latest detections
+            with self.detections_lock:
+                if self.latest_detections is None:
+                    response.success = False
+                    response.message = 'No SAM detections available. Ensure simple_sam_detector is running.'
+                    response.u = 0.0
+                    response.v = 0.0
+                    response.theta = 0.0
+                    response.width = 0.0
+                    response.height = 0.0
+                    self.get_logger().warn('No detections available')
+                    return response
+                
+                detections = self.latest_detections
+            
+            # Find object within the given bbox using IoU (Intersection over Union)
+            best_detection = None
+            best_iou = 0.0
+            
+            req_area = (request.x2 - request.x1) * (request.y2 - request.y1)
+            
+            for detection in detections.detections:
+                if len(detection.bbox) < 4:
+                    continue
+                
+                det_x1, det_y1, det_x2, det_y2 = detection.bbox[0], detection.bbox[1], detection.bbox[2], detection.bbox[3]
+                
+                # Calculate intersection
+                inter_x1 = max(request.x1, det_x1)
+                inter_y1 = max(request.y1, det_y1)
+                inter_x2 = min(request.x2, det_x2)
+                inter_y2 = min(request.y2, det_y2)
+                
+                if inter_x2 > inter_x1 and inter_y2 > inter_y1:
+                    inter_area = (inter_x2 - inter_x1) * (inter_y2 - inter_y1)
+                    det_area = (det_x2 - det_x1) * (det_y2 - det_y1)
+                    union_area = req_area + det_area - inter_area
+                    iou = inter_area / union_area if union_area > 0 else 0.0
+                    
+                    if iou > best_iou:
+                        best_iou = iou
+                        best_detection = detection
+            
+            if best_detection is None:
+                response.success = False
+                response.message = f'No object found within bbox [{request.x1}, {request.y1}, {request.x2}, {request.y2}]'
+                response.u = 0.0
+                response.v = 0.0
+                response.theta = 0.0
+                response.width = 0.0
+                response.height = 0.0
+                self.get_logger().warn(f'No object detected in the specified region (checked {len(detections.detections)} detections)')
+                return response
+            
+            self.get_logger().info(f'Found object: {best_detection.object_id} with IoU={best_iou:.3f}')
+            
+            # Get the object's bbox and mask
+            x1, y1, x2, y2 = best_detection.bbox[0], best_detection.bbox[1], best_detection.bbox[2], best_detection.bbox[3]
+            
+            # Get mask if available
+            mask = None
+            try:
+                if best_detection.mask is not None:
+                    mask = self.bridge.imgmsg_to_cv2(best_detection.mask, desired_encoding='mono8')
+                    self.get_logger().info(f'Using mask for accurate OBB calculation')
+            except Exception as e:
+                self.get_logger().debug(f'Failed to convert mask: {e}')
+            
+            # Calculate OBB using the detected object's bbox and mask
+            u, v, theta, width, height = self.calculate_obb_from_bbox(x1, y1, x2, y2, mask)
             
             # Populate response
             response.success = True
-            response.message = f'OBB calculated successfully for bbox [{request.x1}, {request.y1}, {request.x2}, {request.y2}]'
+            response.message = f'OBB calculated for {best_detection.object_id} within bbox [{request.x1}, {request.y1}, {request.x2}, {request.y2}]'
             response.u = u
             response.v = v
             response.theta = theta
             response.width = width
             response.height = height
             
-            # Log results
+            # Log results concisely
             angle_deg = np.rad2deg(theta)
-            self.get_logger().info('=' * 80)
-            self.get_logger().info('[OBB RESULT]')
-            self.get_logger().info(f'  Center (u,v): ({u:.2f}, {v:.2f}) pixels')
-            self.get_logger().info(f'  Angle: {angle_deg:.2f} degrees')
-            self.get_logger().info(f'  Theta: {theta:.4f} radians')
-            self.get_logger().info(f'  Width: {width:.2f} pixels (angle parallel to this)')
-            self.get_logger().info(f'  Height: {height:.2f} pixels')
-            self.get_logger().info('=' * 80)
+            self.get_logger().info('=' * 60)
+            self.get_logger().info(f'OBB Result ({best_detection.object_id}): center=({u:.1f},{v:.1f}), angle={angle_deg:.1f}deg, size={width:.0f}x{height:.0f}')
+            self.get_logger().info('=' * 60)
             
-            # Visualize with unified function
-            viz_data = [("Input_BBox", u, v, theta, width, height, [request.x1, request.y1, request.x2, request.y2])]
+            # Visualize with unified function - pass the INPUT bbox from request for visualization
+            viz_data = [(best_detection.object_id, u, v, theta, width, height, [request.x1, request.y1, request.x2, request.y2])]
             self.visualize_obb(viz_data, mode="single")
             
         except Exception as e:
@@ -718,9 +775,9 @@ class OBBAngleServiceNode(Node):
             response.heights = heights
             response.bboxes = bboxes
             
-            self.get_logger().info('=' * 80)
-            self.get_logger().info(f'[OBB RESULT] Processed {len(object_ids)} objects successfully')
-            self.get_logger().info('=' * 80)
+            self.get_logger().info('=' * 60)
+            self.get_logger().info(f'OBB Result: Processed {len(object_ids)} objects successfully')
+            self.get_logger().info('=' * 60)
             
             # Visualize all objects with unified function
             if len(viz_results) > 0:
