@@ -412,8 +412,9 @@ class OBBAngleServiceNode(Node):
                           (255, 0, 255) if mode == "single" else color, 
                           arrow_thickness, tipLength=0.3)
             
-            # Draw label
-            angle_deg = np.rad2deg(theta)
+            # Draw label (use remapped angle: 90deg - original geometry angle)
+            angle_geom_deg = np.rad2deg(theta)
+            angle_deg = 90.0 - angle_geom_deg
             
             if mode == "single":
                 # Concise info box for single object
@@ -626,25 +627,30 @@ class OBBAngleServiceNode(Node):
                 self.get_logger().debug(f'Failed to convert mask: {e}')
             
             # Calculate OBB using the detected object's bbox and mask
-            u, v, theta, width, height = self.calculate_obb_from_bbox(x1, y1, x2, y2, mask)
-            
-            # Populate response
+            u, v, theta_geom, width, height = self.calculate_obb_from_bbox(x1, y1, x2, y2, mask)
+
+            # Remap angle for result only: angle_out_deg = 90 - angle_deg
+            angle_orig_deg = np.rad2deg(theta_geom)
+            angle_result_deg = 90.0 - angle_orig_deg
+            theta_result = np.deg2rad(angle_result_deg)
+
+            # Populate response (use remapped theta, keep geometry unchanged)
             response.success = True
             response.message = f'OBB calculated for {best_detection.object_id} within bbox [{request.x1}, {request.y1}, {request.x2}, {request.y2}]'
             response.u = u
             response.v = v
-            response.theta = theta
+            response.theta = theta_result
             response.width = width
             response.height = height
             
             # Log results concisely
-            angle_deg = np.rad2deg(theta)
+            angle_deg = angle_result_deg
             self.get_logger().info('=' * 60)
             self.get_logger().info(f'OBB Result ({best_detection.object_id}): center=({u:.1f},{v:.1f}), angle={angle_deg:.1f}deg, size={width:.0f}x{height:.0f}')
             self.get_logger().info('=' * 60)
             
             # Visualize with unified function - pass the INPUT bbox from request for visualization
-            viz_data = [(best_detection.object_id, u, v, theta, width, height, [request.x1, request.y1, request.x2, request.y2])]
+            viz_data = [(best_detection.object_id, u, v, theta_geom, width, height, [request.x1, request.y1, request.x2, request.y2])]
             self.visualize_obb(viz_data, mode="single")
             
         except Exception as e:
@@ -741,22 +747,27 @@ class OBBAngleServiceNode(Node):
                 except Exception as e:
                     self.get_logger().debug(f'Failed to convert mask for {object_id}: {e}')
                 
-                # Calculate OBB
-                u, v, theta, width, height = self.calculate_obb_from_bbox(x1, y1, x2, y2, mask)
-                
-                # Store results
+                # Calculate OBB (geometry angle)
+                u, v, theta_geom, width, height = self.calculate_obb_from_bbox(x1, y1, x2, y2, mask)
+
+                # Remap angle for result only: angle_out_deg = 90 - angle_deg
+                angle_orig_deg = np.rad2deg(theta_geom)
+                angle_result_deg = 90.0 - angle_orig_deg
+                theta_result = np.deg2rad(angle_result_deg)
+
+                # Store results (use remapped theta in response arrays)
                 object_ids.append(object_id)
                 centers_u.append(u)
                 centers_v.append(v)
-                thetas.append(theta)
+                thetas.append(theta_result)
                 widths.append(width)
                 heights.append(height)
                 bboxes.extend([int(x1), int(y1), int(x2), int(y2)])
                 
-                # For visualization
-                viz_results.append((object_id, u, v, theta, width, height))
+                # For visualization, keep original geometry angle
+                viz_results.append((object_id, u, v, theta_geom, width, height))
                 
-                angle_deg = np.rad2deg(theta)
+                angle_deg = angle_result_deg
                 self.get_logger().info(
                     f'  {object_id}: center=({u:.1f},{v:.1f}), '
                     f'angle={angle_deg:.1f}deg, size=({width:.1f}x{height:.1f})'
