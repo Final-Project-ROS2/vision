@@ -296,6 +296,7 @@ class FindObjectServiceNode(Node):
                 response.x = []
                 response.y = []
                 response.z = []
+                response.theta = []
                 self.get_logger().error('find_multi_object returned None')
                 return response
             
@@ -308,17 +309,19 @@ class FindObjectServiceNode(Node):
                 response.x = []
                 response.y = []
                 response.z = []
+                response.theta = []
                 return response
             
             self.get_logger().info(f'Found {find_response.total_matches} objects matching label: {label}')
             
-            # Step 2: For each bbox, calculate center and call pixel_to_real
+            # Step 2: For each bbox, call /obb/find_object_angle_bb to get center and angle, then pixel_to_real
             response.object_ids = []
             response.bbox = find_response.bboxes if find_response.bboxes else []
             response.confidence = find_response.confidences if find_response.confidences else []
             response.x = []
             response.y = []
             response.z = []
+            response.theta = []
             
             # Convert flattened bboxes back to list of [x1, y1, x2, y2] for processing
             bboxes_list = []
@@ -333,13 +336,32 @@ class FindObjectServiceNode(Node):
                         response.x.append(0.0)
                         response.y.append(0.0)
                         response.z.append(0.0)
+                        response.theta.append(0.0)
                         continue
                     
                     x1, y1, x2, y2 = bbox[:4]
-                    u = int((x1 + x2) / 2)
-                    v = int((y1 + y2) / 2)
                     
-                    self.get_logger().info(f'Object {idx}: Bounding box center: ({u}, {v})')
+                    self.get_logger().info(f'Object {idx}: Calling /obb/find_object_angle_bb with bbox: [{x1}, {y1}, {x2}, {y2}]...')
+                    obb_req = FindObjectAngleBB.Request()
+                    obb_req.x1 = int(x1)
+                    obb_req.y1 = int(y1)
+                    obb_req.x2 = int(x2)
+                    obb_req.y2 = int(y2)
+                    obb_response = self.obb_angle_client.call(obb_req)
+                    
+                    if obb_response is None or not obb_response.success:
+                        self.get_logger().warn(f'obb_angle_bb service failed for object {idx}: {obb_response.message if obb_response else "service unavailable"}')
+                        response.x.append(0.0)
+                        response.y.append(0.0)
+                        response.z.append(0.0)
+                        response.theta.append(0.0)
+                        continue
+                    
+                    u = int(obb_response.u)
+                    v = int(obb_response.v)
+                    theta = float(obb_response.theta)
+                    
+                    self.get_logger().info(f'Object {idx}: OBB center: ({u}, {v}), angle: {theta:.4f} rad')
                     
                     # Call /pixel_to_real service (synchronously)
                     pixel_req = PixelToReal.Request()
@@ -352,6 +374,7 @@ class FindObjectServiceNode(Node):
                         response.x.append(0.0)
                         response.y.append(0.0)
                         response.z.append(0.0)
+                        response.theta.append(0.0)
                         continue
                     
                     response.x.append(pixel_response.x)
@@ -360,14 +383,16 @@ class FindObjectServiceNode(Node):
                         response.z.append(pixel_response.z + TCP_OFFSET)
                     else:
                         response.z.append(pixel_response.z)
+                    response.theta.append(theta)
                     
-                    self.get_logger().info(f'Object {idx} at world coordinates: ({pixel_response.x:.3f}, {pixel_response.y:.3f}, {pixel_response.z:.3f})')
+                    self.get_logger().info(f'Object {idx} at world coordinates: ({pixel_response.x:.3f}, {pixel_response.y:.3f}, {pixel_response.z:.3f}), angle: {theta:.4f} rad')
                     
                 except Exception as e:
                     self.get_logger().error(f'Error processing object {idx}: {str(e)}')
                     response.x.append(0.0)
                     response.y.append(0.0)
                     response.z.append(0.0)
+                    response.theta.append(0.0)
             
             # Step 3: Return final response
             response.success = True
@@ -385,6 +410,7 @@ class FindObjectServiceNode(Node):
             response.x = []
             response.y = []
             response.z = []
+            response.theta = []
         
         return response
 
