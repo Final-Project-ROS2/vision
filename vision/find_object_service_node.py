@@ -4,7 +4,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
-from custom_interfaces.srv import DetectObjects, FindObject, PixelToReal, FindObjectReal, FindObjectAngleBB, FindMultiObject, FindMultiObjectReal
+from custom_interfaces.srv import DetectObjects, FindObject, PixelToReal, FindObjectReal, FindObjectAngleBB, FindMultiObjectReal, FindMultiObject
 
 
 
