@@ -13,7 +13,19 @@ import numpy as np
 class PixelToRealNode(Node):
 
     def __init__(self):
+<<<<<<< HEAD
         super().__init__("pixel_to_real_node")
+=======
+        super().__init__('pixel_to_real_node')
+        
+        
+        self.rgb_topic = '/camera/color/image_raw'
+        self.depth_topic = '/camera/depth/image_rect_raw'
+        self.camera_info_topic = '/camera/color/camera_info'  # Use depth camera_info
+        self.color_encoding = 'passthrough'
+        self.depth_32_encoding = 'passthrough'
+        self.depth_16_encoding = 'passthrough'
+>>>>>>> main
 
         self.depth_sub = self.create_subscription(
             Image,
