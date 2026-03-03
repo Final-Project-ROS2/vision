@@ -15,7 +15,7 @@ confidence calculate by SAM detection based
 """
 
 # TCP_OFFSET = 0.157 # Actual TCP_OFFSET value from teach pendant
-TCP_OFFSET = 0.3 # Add safety margin
+TCP_OFFSET = 0.1 # Adjusted TCP_OFFSET
 
 
 class FindObjectServiceNode(Node):
