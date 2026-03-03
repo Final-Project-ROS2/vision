@@ -71,7 +71,7 @@ MIN_POINTS_FOR_GRASP = 5          # Minimum points near grasp for validity
 
 # Grasp Generation
 NUM_GRASP_CANDIDATES = 300  # Balance between coverage and speed
-MIN_GRASP_SCORE = 0.4      # Very permissive - almost all grasps pass
+MIN_GRASP_SCORE = 0.1      # Very permissive - almost all grasps pass
 
 # Approach angle filtering
 APPROACH_TARGET_VECTOR = [0, 0, -1]  # Downward in camera frame
@@ -184,62 +184,40 @@ except ImportError:
 
 # Open3D and GraspNet - lazy loaded when service is called
 o3d = None
+Grasp = None
+GraspGroup = None
 GRASPNET_AVAILABLE = False
 
-# Simple Grasp classes (avoiding complex graspnetAPI dependencies)
-class Grasp:
-    """Simplified Grasp class for storing grasp parameters"""
-    def __init__(self, score, width, height, depth, rotation_matrix, translation, object_id=0):
-        self.score = float(score)
-        self.width = float(width)
-        self.height = float(height)
-        self.depth = float(depth)
-        self.rotation_matrix = np.array(rotation_matrix)
-        self.translation = np.array(translation)
-        self.object_id = int(object_id)
-
-class GraspGroup:
-    """Simplified GraspGroup class for storing multiple grasps"""
-    def __init__(self):
-        self.grasps = []
-    
-    def add(self, grasp):
-        self.grasps.append(grasp)
-    
-    def __len__(self):
-        return len(self.grasps)
-    
-    def __getitem__(self, index):
-        return self.grasps[index]
-    
-    def __iter__(self):
-        return iter(self.grasps)
-    
-    def sort_by_score(self):
-        """Sort grasps by score in descending order"""
-        sorted_group = GraspGroup()
-        sorted_group.grasps = sorted(self.grasps, key=lambda g: g.score, reverse=True)
-        return sorted_group
-
 def _lazy_load_graspnet():
-    """Lazy load Open3D when first needed"""
-    global o3d, GRASPNET_AVAILABLE
+    """Lazy load Open3D and GraspNetAPI when first needed"""
+    global o3d, Grasp, GraspGroup, GRASPNET_AVAILABLE
     
     if GRASPNET_AVAILABLE:
         return True
     
     try:
         import open3d as o3d_module
+        import sys
+        
+        # Add graspnetAPI to path
+        graspnet_path = str(Path(__file__).parent.parent / 'graspnetAPI')
+        if graspnet_path not in sys.path:
+            sys.path.insert(0, graspnet_path)
+        
+        # Import from graspnetAPI.grasp
+        from graspnetAPI.grasp import Grasp as GraspClass, GraspGroup as GraspGroupClass
         
         # Set globals
         o3d = o3d_module
+        Grasp = GraspClass
+        GraspGroup = GraspGroupClass
         GRASPNET_AVAILABLE = True
         
-        print("✓ Open3D loaded successfully")
+        print("✓ Open3D and GraspNetAPI loaded successfully")
         return True
         
     except Exception as e:
-        print(f"✗ Failed to load Open3D: {e}")
+        print(f"✗ Failed to load GraspNet dependencies: {e}")
         import traceback
         traceback.print_exc()
         return False
@@ -491,7 +469,8 @@ class GraspNetEngine:
         densest_center = self._find_densest_region(points)
         self.logger.info(f"  Densest region: [{densest_center[0]:.3f}, {densest_center[1]:.3f}, {densest_center[2]:.3f}]")
         
-        gg = GraspGroup()
+        # Build array of grasps
+        grasp_array_list = []
         
         for i in range(NUM_GRASP_CANDIDATES):
             # Random approach angles
@@ -524,8 +503,10 @@ class GraspNetEngine:
             depth = GRIPPER_DEPTH
             
             grasp = Grasp(score, width, height, depth, rotation, translation, 0)
-            gg.add(grasp)
+            grasp_array_list.append(grasp.grasp_array)
         
+        # Create GraspGroup from array
+        gg = GraspGroup(np.array(grasp_array_list))
         gg = gg.sort_by_score()
         
         self.logger.info(f"✓ Generated {len(gg)} grasp candidates")
@@ -589,16 +570,18 @@ class GraspNetEngine:
         
         initial_count = len(grasp_group)
         
-        # Filter by score threshold
-        filtered_gg = GraspGroup()
-        for grasp in grasp_group:
-            if grasp.score >= MIN_GRASP_SCORE:
-                filtered_gg.add(grasp)
+        # Filter by score threshold - create list of indices to keep
+        keep_indices = []
+        for i in range(len(grasp_group)):
+            if grasp_group[i].score >= MIN_GRASP_SCORE:
+                keep_indices.append(i)
+        
+        filtered_gg = grasp_group[keep_indices] if keep_indices else GraspGroup()
         
         self.logger.info(f"  Score threshold: {initial_count} → {len(filtered_gg)} grasps")
         
         # Collision filter
-        if len(pointcloud.points) > 0:
+        if len(pointcloud.points) > 0 and len(filtered_gg) > 0:
             filtered_gg = self._collision_filter(filtered_gg, pointcloud)
         
         self.logger.info(f"✓ Final grasps: {len(filtered_gg)}")
@@ -612,10 +595,11 @@ class GraspNetEngine:
         if len(points) == 0:
             return grasp_group
         
-        filtered_gg = GraspGroup()
+        keep_indices = []
         num_collided = 0
         
-        for grasp in grasp_group:
+        for i in range(len(grasp_group)):
+            grasp = grasp_group[i]
             pts_gripper = (points - grasp.translation) @ grasp.rotation_matrix
             
             collision = np.any(
@@ -625,12 +609,12 @@ class GraspNetEngine:
             )
             
             if not collision:
-                filtered_gg.add(grasp)
+                keep_indices.append(i)
             else:
                 num_collided += 1
         
         self.logger.info(f"  Collision filter: removed {num_collided} grasps")
-        return filtered_gg
+        return grasp_group[keep_indices] if keep_indices else GraspGroup()
     
     def refine_grasp_candidates(self, grasp_group, pointcloud):
         """Refine grasps to align with actual point clusters"""
@@ -645,11 +629,13 @@ class GraspNetEngine:
         if len(points) == 0:
             return grasp_group
         
-        refined_gg = GraspGroup()
+        # Build new grasp array
+        refined_grasps = []
         num_improved = 0
         num_removed = 0
         
-        for grasp in grasp_group:
+        for i in range(len(grasp_group)):
+            grasp = grasp_group[i]
             distances = np.linalg.norm(points - grasp.translation, axis=1)
             nearby_mask = distances < REFINEMENT_SEARCH_RADIUS
             
@@ -676,19 +662,25 @@ class GraspNetEngine:
                         new_translation,
                         grasp.object_id
                     )
-                    refined_gg.add(refined_grasp)
+                    refined_grasps.append(refined_grasp.grasp_array)
                     num_improved += 1
                     continue
             
-            refined_gg.add(grasp)
+            refined_grasps.append(grasp.grasp_array)
         
         self.logger.info(f"    Improved {num_improved} grasps, removed {num_removed} floating grasps")
-        return refined_gg.sort_by_score()
+        
+        # Create new GraspGroup from array
+        if refined_grasps:
+            refined_gg = GraspGroup(np.array(refined_grasps))
+            return refined_gg.sort_by_score()
+        else:
+            return GraspGroup()
     
     def get_best_grasp(self, grasp_group):
         """Extract the best grasp from the group"""
         if grasp_group is None or len(grasp_group) == 0:
-            return None
+            return None, None
         
         best = grasp_group[0]
         
@@ -720,63 +712,20 @@ class GraspNetEngine:
             'grasp_speed': BEST_GRASP_SPEED_FAST if width_ratio > BEST_GRASP_SPEED_THRESHOLD else BEST_GRASP_SPEED_SLOW,
         }
         
-        return result
+        # Return both the Grasp object (for visualization) and dict (for ROS messages)
+        return best, result
     
-    def create_gripper_mesh(self, grasp_dict, color=None):
-        """Create Open3D mesh geometry for gripper visualization"""
+    def create_gripper_mesh(self, grasp_obj, color=None):
+        """Create Open3D mesh geometry for gripper visualization using graspnetAPI"""
         if color is None:
             color = VIS_COLOR_BEST  # Red by default
         
-        # Extract grasp parameters
-        center = np.array(grasp_dict['position'])
-        rotation = np.array(grasp_dict['rotation'])
-        width = grasp_dict['width']
-        depth = grasp_dict['depth']
-        height = grasp_dict['height']
+        # Use graspnetAPI's built-in to_open3d_geometry method
+        gripper_geometry = grasp_obj.to_open3d_geometry(color=color)
         
-        # Create gripper mesh components
-        geometries = []
-        
-        # Finger dimensions
-        finger_width = VIS_FINGER_WIDTH  # 4mm thick fingers
-        finger_length = depth
-        finger_height = height
-        
-        # Create left finger
-        left_finger = o3d.geometry.TriangleMesh.create_box(
-            width=finger_width, height=finger_height, depth=finger_length
-        )
-        left_finger.translate([-width/2 - finger_width/2, -finger_height/2, -finger_length/2])
-        
-        # Create right finger
-        right_finger = o3d.geometry.TriangleMesh.create_box(
-            width=finger_width, height=finger_height, depth=finger_length
-        )
-        right_finger.translate([width/2 - finger_width/2, -finger_height/2, -finger_length/2])
-        
-        # Create palm (connecting base)
-        palm_width = width + 2 * finger_width
-        palm_height = finger_height
-        palm_depth = VIS_PALM_DEPTH  # 1cm thick palm
-        palm = o3d.geometry.TriangleMesh.create_box(
-            width=palm_width, height=palm_height, depth=palm_depth
-        )
-        palm.translate([-palm_width/2, -palm_height/2, -finger_length/2 - palm_depth])
-        
-        # Combine all parts
-        gripper = left_finger + right_finger + palm
-        
-        # Apply rotation and translation
-        gripper.rotate(rotation, center=[0, 0, 0])
-        gripper.translate(center)
-        
-        # Apply color
-        gripper.paint_uniform_color(color)
-        gripper.compute_vertex_normals()
-        
-        return gripper
+        return gripper_geometry
     
-    def visualize_grasp(self, pointcloud, grasp_dict, grasp_group=None):
+    def visualize_grasp(self, pointcloud, best_grasp_obj, grasp_group=None):
         """Visualize point cloud with detected grasp pose"""
         self.logger.info("Opening 3D visualization...")
         
@@ -785,21 +734,15 @@ class GraspNetEngine:
         # Add point cloud
         geometries.append(pointcloud)
         
-        # Add best grasp (red)
-        best_gripper = self.create_gripper_mesh(grasp_dict, color=VIS_COLOR_BEST)
+        # Add best grasp (red) - graspnetAPI returns a single TriangleMesh
+        best_gripper = self.create_gripper_mesh(best_grasp_obj, color=VIS_COLOR_BEST)
         geometries.append(best_gripper)
         
         # Add alternative grasps (green) if available
         if grasp_group is not None and len(grasp_group) > 1:
-            for i, grasp in enumerate(grasp_group[1:min(VIS_MAX_ALT_GRASPS, len(grasp_group))]):
-                alt_grasp_dict = {
-                    'position': grasp.translation.tolist(),
-                    'rotation': grasp.rotation_matrix.tolist(),
-                    'width': float(grasp.width),
-                    'height': float(grasp.height),
-                    'depth': float(grasp.depth),
-                }
-                alt_gripper = self.create_gripper_mesh(alt_grasp_dict, color=VIS_COLOR_ALT)
+            for i in range(1, min(VIS_MAX_ALT_GRASPS, len(grasp_group))):
+                alt_grasp = grasp_group[i]
+                alt_gripper = self.create_gripper_mesh(alt_grasp, color=VIS_COLOR_ALT)
                 geometries.append(alt_gripper)
         
         # Add coordinate frame (camera origin)
@@ -1032,7 +975,7 @@ class GraspNetDetector(Node):
                 return response
             
             # Step 6: Get best grasp
-            best_grasp = self.grasp_engine.get_best_grasp(refined_grasps)
+            best_grasp_obj, best_grasp = self.grasp_engine.get_best_grasp(refined_grasps)
             
             if best_grasp is None:
                 response.success = False
@@ -1044,7 +987,7 @@ class GraspNetDetector(Node):
             elapsed_time = time.time() - start_time
             
             # Step 7: Visualize result
-            self.grasp_engine.visualize_grasp(pcd_filtered, best_grasp, refined_grasps)
+            self.grasp_engine.visualize_grasp(pcd_filtered, best_grasp_obj, refined_grasps)
             
             # Create GraspPose message
             grasp_msg = GraspPose()
@@ -1137,11 +1080,11 @@ class GraspNetDetector(Node):
             grasp_candidates = self.grasp_engine.generate_grasp_candidates(pcd_filtered)
             filtered_grasps = self.grasp_engine.filter_grasps(grasp_candidates, pcd_filtered)
             refined_grasps = self.grasp_engine.refine_grasp_candidates(filtered_grasps, pcd_filtered)
-            best_grasp = self.grasp_engine.get_best_grasp(refined_grasps)
+            best_grasp_obj, best_grasp = self.grasp_engine.get_best_grasp(refined_grasps)
             
             # Visualize result
             if best_grasp:
-                self.grasp_engine.visualize_grasp(pcd_filtered, best_grasp, refined_grasps)
+                self.grasp_engine.visualize_grasp(pcd_filtered, best_grasp_obj, refined_grasps)
             
             if best_grasp:
                 pos = best_grasp['position']
