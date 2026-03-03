@@ -401,11 +401,10 @@ class OBBAngleServiceNode(Node):
                 cv2.circle(vis_image, (int(u), int(v)), 6, (255, 255, 255), -1)
                 cv2.circle(vis_image, (int(u), int(v)), 8, color, 2)
             
-            # Draw angle arrow parallel to WIDTH (longer dimension), with -90° offset so 0° points UP
-            arrow_length = width / 2.5  # Use width (longer dimension) for arrow length
-            # Arrow points along the width direction (no rotation from theta)
-            # Then apply -90° offset for visualization so 0° = vertical
-            visual_theta = theta - np.pi / 2
+            # Draw angle arrow perpendicular to WIDTH (shorter dimension), with -90° offset so 0° points UP
+            arrow_length = height   # Use height (shorter dimension) for arrow length
+            # Arrow perpendicular to width = add 90° to theta, then -90° for visualization
+            visual_theta = theta + np.pi / 2 - np.pi / 2  # Perpendicular, then visualization offset
             end_x = int(u + arrow_length * np.cos(visual_theta))
             end_y = int(v + arrow_length * np.sin(visual_theta))
             arrow_thickness = 3 if mode == "single" else 2
