@@ -67,6 +67,7 @@ setup(
             'unified_pipeline = vision.unified_pipeline:main',
             'find_object_service = vision.find_object_service_node:main',
             'find_object_grasp_service = vision.find_object_grasp_service_node:main',
+            'obb_angle_service_node = vision.obb_angle_service_node:main',
             'pixel_to_real_world_service = vision.pixel_to_real_world:main',
             'real_cam_info = vision.real_cam_info:main',
             'vqa_action_server = vision.vqa_action_server:main',
