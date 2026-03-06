@@ -85,6 +85,154 @@ except ImportError:
 SAM_MSGS_AVAILABLE = CUSTOM_INTERFACES_AVAILABLE
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# OBJECT PROPERTIES CATALOG
+# Each label maps to a dictionary of semantic attributes.
+# These are attached to every classified result so that downstream consumers
+# (scene understanding, voice-call logic, grasp planner, …) can reason about
+# object characteristics without re-running inference.
+#
+# Keys in each entry:
+#   physical   – material / structural traits relevant to manipulation
+#   handle     – how a robot / human grips the object
+#   grasp_care – safety / care level:  "gentle" | "normal" | "firm"
+#   fragile    – bool, True if the object can break under normal grasp force
+#   weight     – qualitative: "very_light" | "light" | "medium" | "heavy"
+#   task_hints – short list of verbs that make sense for this object
+#   voice_desc – one natural-language sentence for TTS / voice-call responses
+# ─────────────────────────────────────────────────────────────────────────────
+OBJECT_PROPERTIES: Dict[str, Dict] = {
+    "green_cube": {
+        "physical":   ["rigid", "uniform", "stackable"],
+        "handle":     "pinch_or_power_grip",
+        "grasp_care": "normal",
+        "fragile":    False,
+        "weight":     "light",
+        "task_hints": ["pick", "place", "stack", "sort"],
+        "voice_desc": "A small green cube, rigid and easy to grip.",
+    },
+    "drill": {
+        "physical":   ["rigid", "heavy", "powered_tool", "sharp_bit"],
+        "handle":     "power_grip_on_handle",
+        "grasp_care": "firm",
+        "fragile":    False,
+        "weight":     "heavy",
+        "task_hints": ["pick", "hand_over", "place_in_holster"],
+        "voice_desc": "An electric drill — heavy, rigid, handle it by the grip.",
+    },
+    "pink_cube": {
+        "physical":   ["rigid", "uniform", "stackable"],
+        "handle":     "pinch_or_power_grip",
+        "grasp_care": "normal",
+        "fragile":    False,
+        "weight":     "light",
+        "task_hints": ["pick", "place", "stack", "sort"],
+        "voice_desc": "A small pink cube, rigid and easy to grip.",
+    },
+    "measuring_tape": {
+        "physical":   ["rigid_casing", "retractable_blade", "sharp_edge"],
+        "handle":     "power_grip_on_body",
+        "grasp_care": "normal",
+        "fragile":    False,
+        "weight":     "light",
+        "task_hints": ["pick", "extend", "measure", "place"],
+        "voice_desc": "A measuring tape — compact casing with a retractable steel blade.",
+    },
+    "screwdriver": {
+        "physical":   ["elongated", "rigid", "metal_shaft", "plastic_handle"],
+        "handle":     "power_grip_on_handle",
+        "grasp_care": "normal",
+        "fragile":    False,
+        "weight":     "light",
+        "task_hints": ["pick", "hand_over", "insert", "turn", "place"],
+        "voice_desc": "A screwdriver — elongated tool with a plastic handle and metal shaft.",
+    },
+    "blue_marker_pen": {
+        "physical":   ["elongated", "cylindrical", "lightweight", "ink_tip"],
+        "handle":     "pinch_grip",
+        "grasp_care": "gentle",
+        "fragile":    False,
+        "weight":     "very_light",
+        "task_hints": ["pick", "hand_over", "write", "cap", "place"],
+        "voice_desc": "A blue marker pen — thin and light, grip gently near the middle.",
+    },
+    "gear": {
+        "physical":   ["rigid", "metal", "toothed", "circular"],
+        "handle":     "power_grip_on_body",
+        "grasp_care": "normal",
+        "fragile":    False,
+        "weight":     "medium",
+        "task_hints": ["pick", "insert", "align", "place"],
+        "voice_desc": "A metal gear — rigid, toothed disc, handle firmly around the body.",
+    },
+    "monkey_wrench": {
+        "physical":   ["rigid", "metal", "heavy", "adjustable_jaw"],
+        "handle":     "power_grip_on_handle",
+        "grasp_care": "firm",
+        "fragile":    False,
+        "weight":     "heavy",
+        "task_hints": ["pick", "hand_over", "tighten", "loosen", "place"],
+        "voice_desc": "A monkey wrench — heavy metal tool, grip firmly by the handle.",
+    },
+    "piston_rod": {
+        "physical":   ["elongated", "metal", "rigid", "smooth_surface"],
+        "handle":     "power_grip_on_body",
+        "grasp_care": "normal",
+        "fragile":    False,
+        "weight":     "medium",
+        "task_hints": ["pick", "insert", "align", "assemble", "place"],
+        "voice_desc": "A piston rod — smooth metal cylinder, requires careful alignment.",
+    },
+    # ── generic / future labels ──────────────────────────────────────────────
+    "washer": {
+        "physical":   ["flat", "ring_shaped", "metal", "small"],
+        "handle":     "pinch_grip",
+        "grasp_care": "gentle",
+        "fragile":    False,
+        "weight":     "very_light",
+        "task_hints": ["pick", "place", "insert"],
+        "voice_desc": "A small metal washer — flat ring, pinch carefully.",
+    },
+    "hammer": {
+        "physical":   ["rigid", "heavy_head", "wooden_or_rubber_handle"],
+        "handle":     "power_grip_on_handle",
+        "grasp_care": "firm",
+        "fragile":    False,
+        "weight":     "heavy",
+        "task_hints": ["pick", "hand_over", "strike", "place"],
+        "voice_desc": "A hammer — heavy head, grip firmly by the handle.",
+    },
+    "plastic_cup": {
+        "physical":   ["hollow", "lightweight", "deformable", "smooth"],
+        "handle":     "pinch_grip_on_rim",
+        "grasp_care": "gentle",
+        "fragile":    True,
+        "weight":     "very_light",
+        "task_hints": ["pick", "pour", "place", "hand_over"],
+        "voice_desc": "A plastic cup — hollow and lightweight, grip gently to avoid crushing.",
+    },
+    "mug": {
+        "physical":   ["ceramic", "hollow", "handle", "breakable"],
+        "handle":     "pinch_grip_on_handle",
+        "grasp_care": "gentle",
+        "fragile":    True,
+        "weight":     "medium",
+        "task_hints": ["pick", "pour", "place", "hand_over"],
+        "voice_desc": "A ceramic mug — fragile, always grip by the handle.",
+    },
+}
+# Fallback properties used when a label is not in the catalog.
+_DEFAULT_OBJECT_PROPERTIES: Dict = {
+    "physical":   ["unknown"],
+    "handle":     "power_grip",
+    "grasp_care": "normal",
+    "fragile":    False,
+    "weight":     "unknown",
+    "task_hints": ["pick", "place"],
+    "voice_desc": "An unrecognised object — handle with normal care.",
+}
+
+
 class CLIPClassifier(Node):
     """
     CLIP-based image classifier for ROS2
@@ -126,20 +274,20 @@ class CLIPClassifier(Node):
             "measuring_tape",
             "screwdriver",
             "blue_marker_pen",
-            # "gear",
-            # "monkey_wrench",
-            # "piston_rod",
+            "gear",
+            "monkey_wrench",
+            "piston_rod",
             # "washer",
             # "cross_joint_part",
             # "white_ball",
             # "door_handle",
             # "red_ball",
             # "gasket_part",
-            "beer_can",
-            "bowl",
-            "cinder_block",
-            "coke_can",
-            "roomba",
+            # "beer_can",
+            # "bowl",
+            # "cinder_block",
+            # "coke_can",
+            # "roomba",
             # "plastic_cup",
             # "hammer",
             # "robotic_arm",
@@ -322,6 +470,30 @@ class CLIPClassifier(Node):
             self.model = None
             self.preprocess = None
     
+    # ─────────────────────────────────────────────────────────────────────────
+    # Object-properties helper
+    # ─────────────────────────────────────────────────────────────────────────
+    def get_object_properties(self, label: str) -> Dict:
+        """
+        Return the semantic property dictionary for *label*.
+
+        Looks up ``OBJECT_PROPERTIES`` (module-level catalog).  If the label
+        is not in the catalog a copy of ``_DEFAULT_OBJECT_PROPERTIES`` is
+        returned so callers never receive ``None``.
+
+        The returned dict is a **shallow copy** — safe to attach directly to
+        a JSON payload without risk of mutating the catalog.
+
+        Usage example (scene understanding / voice-call logic)::
+
+            props = self.get_object_properties("screwdriver")
+            # props["voice_desc"]  → "A screwdriver — elongated tool …"
+            # props["fragile"]     → False
+            # props["task_hints"]  → ["pick", "hand_over", "insert", …]
+            # props["grasp_care"]  → "normal"
+        """
+        return dict(OBJECT_PROPERTIES.get(label, _DEFAULT_OBJECT_PROPERTIES))
+
     def rgb_callback(self, msg: Image):
         """Handle incoming RGB images from configured RGB topic"""
         try:
@@ -574,11 +746,14 @@ class CLIPClassifier(Node):
             for region in self.latest_region_classifications:
                 top_pred = region['top_prediction']
                 if top_pred['confidence'] >= 0.5:
+                    lbl = top_pred['label']
                     filtered_regions.append({
-                        'region_id': region['region_id'],
-                        'bbox': region['bbox'],
-                        'label': top_pred['label'],
-                        'confidence': top_pred['confidence']
+                        'region_id':        region['region_id'],
+                        'bbox':             region['bbox'],
+                        'label':            lbl,
+                        'confidence':       top_pred['confidence'],
+                        # Semantic properties ready for scene understanding / voice logic
+                        'object_properties': self.get_object_properties(lbl),
                     })
             
             # Build response
@@ -830,9 +1005,12 @@ class CLIPClassifier(Node):
                 region_bgr = frame[y1:y2, x1:x2]
                 similarity = self._compute_similarity(region_bgr, target_label)
                 matches.append({
-                    'region_id': region_id,
-                    'bbox': [int(x1), int(y1), int(x2), int(y2)],
-                    'confidence': round(float(similarity), 4),
+                    'region_id':        region_id,
+                    'bbox':             [int(x1), int(y1), int(x2), int(y2)],
+                    'confidence':       round(float(similarity), 4),
+                    # Properties attached per-match so the caller doesn't need
+                    # a second lookup when building a voice or scene response.
+                    'object_properties': self.get_object_properties(target_label),
                 })
 
             matches.sort(key=lambda item: item['confidence'], reverse=True)
@@ -840,13 +1018,15 @@ class CLIPClassifier(Node):
             top_matches.sort(key=lambda item: item['bbox'][0])
 
             payload = {
-                'success': True,
-                'label': target_label,
-                'requested_k': top_k,
-                'total_regions': len(bboxes),
-                'total_matches': len(top_matches),
-                'matches': top_matches,
-                'timestamp': datetime.utcnow().isoformat() + 'Z',
+                'success':           True,
+                'label':             target_label,
+                'requested_k':       top_k,
+                'total_regions':     len(bboxes),
+                'total_matches':     len(top_matches),
+                'matches':           top_matches,
+                # Top-level properties for the queried label (convenience shortcut)
+                'object_properties': self.get_object_properties(target_label),
+                'timestamp':         datetime.utcnow().isoformat() + 'Z',
             }
 
             response.success = True
@@ -1070,18 +1250,25 @@ class CLIPClassifier(Node):
                 self.get_logger().info(f"Label '{target_label}' similarity too low: {best_match['confidence']:.3f}")
                 return response
             
-            # Store for visualization
+            # Store for visualization (includes properties for HUD / voice overlay)
+            _found_props = self.get_object_properties(target_label)
             self.latest_found_object = {
-                'label': target_label,
-                'bbox': best_match['bbox'],
-                'confidence': best_match['confidence'],
-                'region_id': best_match['region_id']
+                'label':             target_label,
+                'bbox':              best_match['bbox'],
+                'confidence':        best_match['confidence'],
+                'region_id':         best_match['region_id'],
+                'object_properties': _found_props,
             }
-            
-            # Return success with bbox
+
+            # Return success with bbox + properties embedded in the JSON message
             response.success = True
-            response.message = f"Found '{target_label}' with similarity {best_match['confidence']:.3f}"
-            response.bbox = best_match['bbox']
+            response.message = json.dumps({
+                'label':             target_label,
+                'confidence':        round(float(best_match['confidence']), 4),
+                'bbox':              best_match['bbox'],
+                'object_properties': _found_props,
+            }, indent=2)
+            response.bbox       = best_match['bbox']
             response.confidence = float(best_match['confidence'])
             # Note: FindObject.srv doesn't have object_id field (only FindObjectReal.srv does)
             
@@ -1141,17 +1328,20 @@ class CLIPClassifier(Node):
         # Sort predictions by confidence
         sorted_indices = np.argsort(probs_np)[::-1]
         
-        # Build predictions list
+        # Build predictions list (with object properties attached to each entry)
         all_predictions = []
         for idx in sorted_indices:
+            lbl = self.candidate_labels[idx]
             all_predictions.append({
-                "label": self.candidate_labels[idx],
-                "confidence": round(float(probs_np[idx]), 2)
+                "label":             lbl,
+                "confidence":        round(float(probs_np[idx]), 2),
+                "object_properties": self.get_object_properties(lbl),
             })
-        
+
         # Calculate processing time
         processing_time_ms = int((time.time() - start_time) * 1000)
-        
+
+        top_lbl = all_predictions[0]["label"]
         # Build JSON schema (without image vectors)
         schema = {
             "pipeline": "single_clip",
@@ -1162,8 +1352,9 @@ class CLIPClassifier(Node):
             },
             "output": {
                 "top_prediction": {
-                    "label": all_predictions[0]["label"],
-                    "confidence": all_predictions[0]["confidence"]
+                    "label":             top_lbl,
+                    "confidence":        all_predictions[0]["confidence"],
+                    "object_properties": self.get_object_properties(top_lbl),
                 },
                 "all_predictions": all_predictions,
                 "metadata": {
@@ -1236,23 +1427,29 @@ class CLIPClassifier(Node):
             # Sort predictions by confidence
             sorted_indices = np.argsort(probs_np)[::-1]
             
-            # Build predictions list
+            # Build predictions list (with object properties attached)
             all_predictions = []
             for idx in sorted_indices:
+                lbl = self.candidate_labels[idx]
                 all_predictions.append({
-                    "label": self.candidate_labels[idx],
-                    "confidence": round(float(probs_np[idx]), 2)
+                    "label":             lbl,
+                    "confidence":        round(float(probs_np[idx]), 2),
+                    "object_properties": self.get_object_properties(lbl),
                 })
-            
+
+            top_lbl = all_predictions[0]["label"]
             # Build region result
             region_result = {
                 "region_id": region_id,
                 "bbox": [int(x1), int(y1), int(x2), int(y2)],
                 "top_prediction": {
-                    "label": all_predictions[0]["label"],
-                    "confidence": all_predictions[0]["confidence"]
+                    "label":             top_lbl,
+                    "confidence":        all_predictions[0]["confidence"],
+                    # Full properties dict attached here so voice/scene-understanding
+                    # can read e.g. region["top_prediction"]["object_properties"]["voice_desc"]
+                    "object_properties": self.get_object_properties(top_lbl),
                 },
-                "all_predictions": all_predictions[:10]  # Top 10
+                "all_predictions": all_predictions[:10],  # Top 10
             }
             
             classified_regions.append(region_result)
