@@ -17,7 +17,7 @@ Camera Input → SAM Detection → CLIP Classification → GraspNet → Scene Un
 
 ---
 
-
+height = 73.66cm or 29 inch
 
 ##  Quick Start
 
