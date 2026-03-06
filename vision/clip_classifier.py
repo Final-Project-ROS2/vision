@@ -125,6 +125,7 @@ class CLIPClassifier(Node):
             "pink_cube",
             "measuring_tape",
             "screwdriver",
+            "blue_marker_pen",
             # "gear",
             # "monkey_wrench",
             # "piston_rod",

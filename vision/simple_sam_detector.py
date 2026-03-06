@@ -54,6 +54,19 @@ class SimpleSAMDetector(Node):
         self.declare_parameter('real_hardware', False)
         self.real_hardware = bool(self.get_parameter('real_hardware').value)
 
+        # ── HSV background-subtraction parameters (Step 1) ────────────────────
+        # Define the HSV range of the *background* mat/surface colour so it can
+        # be subtracted.  Default: blue mat (H 90-130, full S&V).
+        # Override at launch:  --ros-args -p bg_h_min:=90 -p bg_h_max:=130 ...
+        self.declare_parameter('bg_h_min',  90)   # Hue lower bound  (0-179)
+        self.declare_parameter('bg_h_max', 130)   # Hue upper bound  (0-179)
+        self.declare_parameter('bg_s_min',  50)   # Saturation lower (0-255)
+        self.declare_parameter('bg_s_max', 255)   # Saturation upper (0-255)
+        self.declare_parameter('bg_v_min',  40)   # Value/brightness lower bound
+        self.declare_parameter('bg_v_max', 255)   # Value/brightness upper bound
+        self.declare_parameter('bg_hsv_enabled', True)  # Set False to disable
+        # ─────────────────────────────────────────────────────────────────────
+
         # RealSense-specific variables for hardware mode
         self.rs_pipeline = None
         self.rs_align = None
@@ -632,11 +645,136 @@ class SimpleSAMDetector(Node):
         
         # Apply Gaussian blur to reduce noise
         blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-        
-        # Try multiple detection methods for robustness
+
+        # ─────────────────────────────────────────────────────────────────────
+        # Convert to HSV once — used by Steps 1, 2 and 3 below.
+        # HSV separates colour (H) from lighting (V), making colour-based
+        # segmentation robust to changes in illumination.
+        # ─────────────────────────────────────────────────────────────────────
+        hsv = cv2.cvtColor(rgb_image, cv2.COLOR_BGR2HSV)
+
+        # ── STEP 1: Background (blue mat) subtraction ─────────────────────────
+        # Build a mask of the background colour (default: blue mat).
+        # Inverting it gives a foreground mask where ALL non-background pixels
+        # (red handle, metal shaft, ruler, marker …) are WHITE — they are
+        # automatically grouped together because they share the property of
+        # "not being the mat colour".  This is the primary fix for split tool
+        # detections.
+        # Parameters are ROS2-declared so you can tune them at launch without
+        # recompiling:  --ros-args -p bg_h_min:=90 -p bg_h_max:=130
+        _bg_enabled = bool(self.get_parameter('bg_hsv_enabled').value)
+        _bg_h_min = int(self.get_parameter('bg_h_min').value)
+        _bg_h_max = int(self.get_parameter('bg_h_max').value)
+        _bg_s_min = int(self.get_parameter('bg_s_min').value)
+        _bg_s_max = int(self.get_parameter('bg_s_max').value)
+        _bg_v_min = int(self.get_parameter('bg_v_min').value)
+        _bg_v_max = int(self.get_parameter('bg_v_max').value)
+
+        if _bg_enabled:
+            # Pixels that match the background colour
+            _bg_mask = cv2.inRange(
+                hsv,
+                np.array([_bg_h_min, _bg_s_min, _bg_v_min], dtype=np.uint8),
+                np.array([_bg_h_max, _bg_s_max, _bg_v_max], dtype=np.uint8)
+            )
+            # Foreground = everything that is NOT the background colour
+            _fg_from_bg = cv2.bitwise_not(_bg_mask)
+            bg_px = int(_bg_mask.sum() / 255)
+            self.get_logger().info(
+                f"Step 1 – BG subtraction: {bg_px} background px removed "
+                f"(H={_bg_h_min}-{_bg_h_max}, S={_bg_s_min}-{_bg_s_max}, "
+                f"V={_bg_v_min}-{_bg_v_max})"
+            )
+        else:
+            # BG subtraction disabled: treat every pixel as foreground
+            _fg_from_bg = np.full((h, w), 255, dtype=np.uint8)
+            self.get_logger().info("Step 1 – BG subtraction: disabled")
+        # ─────────────────────────────────────────────────────────────────────
+
+        # ── STEP 2: Shadow suppression (V-channel threshold) ──────────────────
+        # Shadows appear as dark-blue to a camera (low V, medium S).
+        # We keep ONLY pixels whose brightness is above a minimum threshold so
+        # shadow blobs are classified as background and never bleed into bboxes.
+        # S_min=30 also removes achromatic grey noise.
+        _shadow_valid = cv2.inRange(
+            hsv,
+            np.array([0,  30,  40], dtype=np.uint8),
+            np.array([180, 255, 255], dtype=np.uint8)
+        )
+        # Erode the shadow mask slightly so shadow edges don't bleed into objects
+        _sv_erode_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        _shadow_valid = cv2.erode(_shadow_valid, _sv_erode_k, iterations=1)
+        self.get_logger().info(
+            f"Step 2 – Shadow mask: {int(_shadow_valid.sum() / 255)} valid px / {w * h} total"
+        )
+        # ─────────────────────────────────────────────────────────────────────
+
+        # ── STEP 3: Glare suppression + morphological closing ─────────────────
+        # Metallic tools (ruler, marker) have specular white glare.
+        # Pure white (high V, low S) is not the background colour but can punch
+        # holes in a mask.  We suppress those pixels and then apply a Closing
+        # operation (dilate → erode) to bridge any remaining tiny gaps, producing
+        # one solid blob per object — the "digital shrink-wrap" effect.
+
+        _glare_mask = cv2.inRange(
+            hsv,
+            np.array([0,   0, 240], dtype=np.uint8),
+            np.array([180, 30, 255], dtype=np.uint8)
+        )
+        _gl_dilate_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
+        _glare_mask = cv2.dilate(_glare_mask, _gl_dilate_k, iterations=2)
+        glare_px = int(_glare_mask.sum() / 255)
+        if glare_px:
+            self.get_logger().info(f"Step 3 – Glare mask: suppressing {glare_px} blown-out px")
+
+        # Combined exclusion mask: pixels that are shadow OR glare are background
+        _exclude_mask = cv2.bitwise_or(_glare_mask, cv2.bitwise_not(_shadow_valid))
+
+        # Morphological helpers used inside _clean_mask and Method 4
+        _erode_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        _close_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (25, 25))
+
+        def _clean_mask(mask: np.ndarray) -> np.ndarray:
+            """
+            Apply the full 3-sub-step preprocessing pipeline to a binary mask:
+              1. Subtract background colour pixels (Step 1 result)
+              2. Zero out shadow & glare regions (Steps 2 & 3)
+              3. Erode to sever object-shadow bridges
+              4. Close  to fuse intra-object gaps  → one solid blob per object
+            """
+            # 1. keep only foreground (non-background-colour) pixels
+            mask = cv2.bitwise_and(mask, _fg_from_bg)
+            # 2. suppress shadows and glare
+            mask = cv2.bitwise_and(mask, cv2.bitwise_not(_exclude_mask))
+            # 3. erode – disconnect object from shadow bleed
+            mask = cv2.erode(mask, _erode_k, iterations=2)
+            # 4. close – bridge internal gaps so the object is one blob
+            mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, _close_k, iterations=2)
+            return mask
+        # ─────────────────────────────────────────────────────────────────────
+
+        # ── STEP 4: Contour extraction ────────────────────────────────────────
+        # Run contour detection on the clean foreground mask(s).
+        # Method 4 (HSV background subtraction) is the primary method;
+        # Methods 1-3 act as fallbacks for scenes where BG colour is absent.
         all_contours = []
+
+        # Method 4 (PRIMARY): HSV background subtraction foreground mask
+        # This is the most accurate method for a known-colour background.
+        if _bg_enabled:
+            try:
+                fg_clean = _clean_mask(_fg_from_bg.copy())
+                contours_bg, _ = cv2.findContours(
+                    fg_clean, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+                )
+                all_contours.extend(contours_bg)
+                self.get_logger().info(
+                    f"Method 4 (HSV BG subtraction) found {len(contours_bg)} contours"
+                )
+            except Exception as e:
+                self.get_logger().warn(f"Method 4 (HSV BG subtraction) failed: {e}")
         
-        # Method 1: Adaptive thresholding
+        # Method 1: Adaptive thresholding (fallback)
         try:
             thresh_adaptive = cv2.adaptiveThreshold(
                 blurred, 255, 
@@ -647,42 +785,47 @@ class SimpleSAMDetector(Node):
             kernel = np.ones((3, 3), np.uint8)
             thresh_adaptive = cv2.morphologyEx(thresh_adaptive, cv2.MORPH_CLOSE, kernel, iterations=2)
             thresh_adaptive = cv2.morphologyEx(thresh_adaptive, cv2.MORPH_OPEN, kernel, iterations=1)
+            thresh_adaptive = _clean_mask(thresh_adaptive)
             contours_adaptive, _ = cv2.findContours(thresh_adaptive, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             all_contours.extend(contours_adaptive)
-            self.get_logger().info(f"Adaptive threshold found {len(contours_adaptive)} contours")
+            self.get_logger().info(f"Method 1 (adaptive threshold) found {len(contours_adaptive)} contours")
         except Exception as e:
             self.get_logger().warn(f"Adaptive threshold failed: {e}")
         
-        # Method 2: Otsu's thresholding (works better for bimodal images)
+        # Method 2: Otsu's thresholding (fallback — good for bimodal images)
         try:
             _, thresh_otsu = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
             kernel = np.ones((3, 3), np.uint8)
             thresh_otsu = cv2.morphologyEx(thresh_otsu, cv2.MORPH_CLOSE, kernel, iterations=2)
+            thresh_otsu = _clean_mask(thresh_otsu)
             contours_otsu, _ = cv2.findContours(thresh_otsu, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             all_contours.extend(contours_otsu)
-            self.get_logger().info(f"Otsu threshold found {len(contours_otsu)} contours")
+            self.get_logger().info(f"Method 2 (Otsu threshold) found {len(contours_otsu)} contours")
         except Exception as e:
             self.get_logger().warn(f"Otsu threshold failed: {e}")
         
-        # Method 3: Canny edge detection (catches edges/boundaries)
+        # Method 3: Canny edge detection (fallback — catches edges/boundaries)
         try:
             edges = cv2.Canny(blurred, 50, 150)
             kernel = np.ones((5, 5), np.uint8)
             edges_dilated = cv2.dilate(edges, kernel, iterations=2)
+            edges_dilated = _clean_mask(edges_dilated)
             contours_canny, _ = cv2.findContours(edges_dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             all_contours.extend(contours_canny)
-            self.get_logger().info(f"Canny edge detection found {len(contours_canny)} contours")
+            self.get_logger().info(f"Method 3 (Canny edge) found {len(contours_canny)} contours")
         except Exception as e:
             self.get_logger().warn(f"Canny edge detection failed: {e}")
         
         self.get_logger().info(f"Total contours from all methods: {len(all_contours)}")
         
+        self.get_logger().info(
+            f"Step 4 total contours from all methods: {len(all_contours)}"
+        )
+
         # Relaxed filter parameters (was too strict before)
-        min_area = (w * h) * 0.0005  # Reduced from 0.001 (0.05% instead of 0.1%)
-        # FIX: Reduced max_area from 0.9 (90%) to 0.35 (35%) to filter out large regions
-        # like arms/hands that enter the scene during robot movement
+        min_area = (w * h) * 0.0005  # 0.05% of image
         max_area = (w * h) * 0.35    # 35% of image - filters out large objects (arms, hands)
-        min_box_size = 15            # Reduced from 20 to catch smaller objects
+        min_box_size = 15
         
         self.get_logger().info(f"Area filtering: min={min_area:.0f} px, max={max_area:.0f} px ({0.35*100:.0f}% of image)")
         
@@ -703,7 +846,13 @@ class SimpleSAMDetector(Node):
             if w_box < min_box_size or h_box < min_box_size:
                 continue
             
-            # Check for duplicate/overlapping detections (IoU > 0.7 with existing)
+            # ── FIX C extra: reject wildly elongated / runaway bounding boxes ──
+            # A box whose aspect ratio is > 10:1 (or < 1:10) is almost certainly
+            # a shadow stripe or a noise artifact, not a real object.
+            aspect = max(w_box, h_box) / max(min(w_box, h_box), 1)
+            if aspect > 10.0:
+                continue
+            # ───────────────────────────────────────────────────────────────────
             bbox_new = [x, y, x + w_box, y + h_box]
             is_duplicate = False
             for seen_bbox in seen_boxes:
@@ -717,9 +866,13 @@ class SimpleSAMDetector(Node):
             
             seen_boxes.append(bbox_new)
             
-            # Create binary mask for this object
+            # Create binary mask for this object.
+            # Zero out background-colour, shadow and glare pixels so the stored
+            # mask only covers the actual object surface.
             mask = np.zeros((h, w), dtype=np.uint8)
             cv2.drawContours(mask, [contour], -1, 255, -1)
+            mask = cv2.bitwise_and(mask, _fg_from_bg)                       # Step 1: remove BG colour
+            mask = cv2.bitwise_and(mask, cv2.bitwise_not(_exclude_mask))    # Steps 2&3: remove shadow/glare
             
             # Calculate confidence based on contour properties
             perimeter = cv2.arcLength(contour, True)
@@ -781,12 +934,72 @@ class SimpleSAMDetector(Node):
             
             detections.append(detection)
         
+        # ── FIX 2: SAM "Whole" mask selection ────────────────────────────────
+        # SAM internally produces Sub-part / Part / Whole masks.  When we have
+        # multiple candidate detections that strongly overlap (IoU > 0.4), the
+        # smaller ones are likely "Part"-level predictions.  Keep only the
+        # LARGEST-area candidate per overlapping group, which corresponds to
+        # SAM's "Whole" object mask.
+        detections = self._select_whole_masks(detections)
+        # ─────────────────────────────────────────────────────────────────────
+
         self.get_logger().info(f"Final detections after filtering: {len(detections)} objects")
         if len(detections) == 0:
             self.get_logger().warn("⚠️ No objects detected - image may have uniform background or low contrast")
             self.get_logger().warn(f"   Try adjusting lighting or moving objects closer to camera")
         
         return detections
+
+    def _select_whole_masks(self, detections: List[Dict]) -> List[Dict]:
+        """
+        Mimic SAM's Sub-part / Part / Whole hierarchy by keeping only the
+        largest-area detection inside each overlapping group.
+
+        When two or more candidates overlap with IoU > 0.4 (i.e. one is
+        likely a sub-region of another), we discard the smaller one(s) and
+        retain the biggest — analogous to selecting SAM's "Whole" mask level
+        rather than the "Part" mask that usually carries the highest score.
+
+        Args:
+            detections: raw list produced by the contour loop
+
+        Returns:
+            Filtered list with part-level duplicates removed
+        """
+        if len(detections) <= 1:
+            return detections
+
+        # Sort largest-area first so the outer loop always sees the "Whole"
+        # candidate before the smaller "Part" candidates inside it.
+        sorted_dets = sorted(detections, key=lambda d: d['area'], reverse=True)
+
+        kept: List[Dict] = []
+        suppressed = set()  # indices into sorted_dets that were absorbed
+
+        for i, det_i in enumerate(sorted_dets):
+            if i in suppressed:
+                continue
+            kept.append(det_i)
+            # Suppress all smaller candidates that heavily overlap with det_i
+            for j in range(i + 1, len(sorted_dets)):
+                if j in suppressed:
+                    continue
+                det_j = sorted_dets[j]
+                iou = self._calculate_iou(det_i['bbox'], det_j['bbox'])
+                if iou > 0.4:
+                    suppressed.add(j)
+                    self.get_logger().debug(
+                        f"[Whole-mask] Suppressed part-level detection "
+                        f"area={det_j['area']} (IoU={iou:.2f} with whole area={det_i['area']})"
+                    )
+
+        removed = len(detections) - len(kept)
+        if removed:
+            self.get_logger().info(
+                f"[Whole-mask] Removed {removed} part-level duplicate(s), "
+                f"kept {len(kept)} whole-object detection(s)"
+            )
+        return kept
     
     def _calculate_iou(self, bbox1: List[int], bbox2: List[int]) -> float:
         """
