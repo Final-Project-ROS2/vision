@@ -21,26 +21,28 @@ Camera Input → SAM Detection → CLIP Classification → GraspNet → Scene Un
 
 ##  Quick Start
 
-### 1. Build the Package
+### 1. Activate Vision Environment
 
 ```bash
 cd ~/final_project_ws
-colcon build
 source install/setup.bash
-```
-
-### 2. Activate Vision Environment
-
-```bash
-# From final_project_ws directory
 source vision_venv/bin/activate
 ```
+
+
+### 2. Build the Package
+
+```bash
+colcon build
+```
+
 
 ### 3. Launch Complete Pipeline
 
 **Option A - Single Launch Command (Recommended):**
 ```bash
-ros2 launch ur_yt_sim final_project.launch.py
+source install/setup.bash
+ros2 launch ur_yt_sim final_project.launch.py mode:=real
 ```
 argument
 
