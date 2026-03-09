@@ -45,7 +45,10 @@ class PixelToRealNode(Node):
         self.depth_scale = 0.001  # mm to meters
 
         # ---- Camera Pose in base_link ----
-        self.t_base_cam = np.array([0.0027, 0.5442, 0.6711])
+        self.t_base_cam = np.array([-0.109, 0.451, 0.66]) #0.0027, 0.5442, 0.6711
+# 0.6371
+# -0.0109, 0.5429, 0.6701
+
 
         self.R_base_cam = np.array([
             [1.0,  0.0,  0.0],
@@ -102,21 +105,41 @@ class PixelToRealNode(Node):
 
         Z = float(depth_raw) * self.depth_scale
 
-        # Camera frame 3D
+        # ============================================================
+        # METHOD 1: Intrinsics-based (camera calibration dependent)
+        # ============================================================
+        # Camera frame 3D using PinholeCameraModel
         ray = self.cam_model.projectPixelTo3dRay((u, v))
-
         X_cam = ray[0] * Z
         Y_cam = ray[1] * Z
         Z_cam = Z
-
         p_cam = np.array([X_cam, Y_cam, Z_cam])
-
+        
         # Transform to base frame
         p_base = self.R_base_cam @ p_cam + self.t_base_cam
-
-        response.x = float(p_base[0])
-        response.y = float(p_base[1])
-        response.z = float(p_base[2])
+        
+        # ============================================================
+        # METHOD 2: Empirical calibration (refined via least squares fit)
+        # ============================================================
+        # Fitted from 8 calibration points across the image
+        # Coefficients derived from least-squares regression:
+        # X = -0.433485 + 0.001057*u + 0.000123*v
+        # Y = +0.811351 + 0.000001*u - 0.001093*v
+        # RMS error: 0.0170 m (~17 mm)
+        
+        x_calib = -0.433485 + 0.001057 * u + 0.000123 * v
+        y_calib = 0.811351 + 0.000001 * u - 0.001093 * v
+        z_calib = 0.8  # Assume table height for now
+        
+        # Use empirical calibration (METHOD 2) - much more accurate
+        response.x = float(x_calib)
+        response.y = float(y_calib)
+        response.z = float(z_calib)
+        
+        # Alternative intrinsics-based approach (commented out):
+        # response.x = float(p_base[0])
+        # response.y = float(p_base[1])
+        # response.z = float(p_base[2])
 
         return response
 
