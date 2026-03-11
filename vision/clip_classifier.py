@@ -53,12 +53,12 @@ import numpy as np
 import sys
 import json
 from datetime import datetime
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Optional
 import time
 
 # Import custom interfaces
 try:
-    from custom_interfaces.srv import ClassifyBBox
+    from custom_interfaces.srv import ClassifyBBox, FindMultiObject
     from custom_interfaces.msg import SAMDetections, SAMDetection, CLIPClassification
     CUSTOM_INTERFACES_AVAILABLE = True
 except ImportError:
@@ -241,6 +241,14 @@ class CLIPClassifier(Node):
                 self.get_logger().info("Service created: /vision/find_object")
             except ImportError:
                 self.get_logger().warn("FindObject service not available. Add to custom_interfaces.")
+
+            self.find_multi_object_service = self.create_service(
+                    FindMultiObject,
+                    '/vision/find_multi_object',
+                    self.find_multi_object_callback,
+                    callback_group=self.callback_group
+            )
+            self.get_logger().info("Service created: /vision/find_multi_object (FindMultiObject)")
         
         # Classify all SAM bboxes with confidence filter service
         self.classify_filtered_service = self.create_service(
@@ -289,6 +297,7 @@ class CLIPClassifier(Node):
         self.get_logger().info(f"Service: /vision/classify_bb")
         self.get_logger().info(f"Service: /vision/classify_bbox_filtered")
         self.get_logger().info(f"Service: /vision/find_object")
+        self.get_logger().info("Service: /vision/find_multi_object")
         self.get_logger().info(f"Subscriber: /vision/sam_detections (auto-classify on SAM publish)")
         self.get_logger().info(f"OpenCV Window: '{self.window_name}'")
     
@@ -661,6 +670,208 @@ class CLIPClassifier(Node):
             )
         except Exception as e:
             self.get_logger().error(f"Error handling placeholder SAM detections: {e}")
+
+    def _set_response_common(self, response, success: bool, message: str):
+        """Set common response fields when available."""
+        if hasattr(response, 'success'):
+            response.success = success
+        if hasattr(response, 'message'):
+            response.message = message
+
+    def _call_detect_objects(self) -> Tuple[List[List[int]], Optional[str]]:
+        """Call /vision/detect_objects and return bboxes or error message."""
+        try:
+            from custom_interfaces.srv import DetectObjects
+        except ImportError:
+            return [], 'DetectObjects service interface not available'
+
+        detect_client = self.create_client(
+            DetectObjects,
+            '/vision/detect_objects',
+            callback_group=self.callback_group
+        )
+
+        if not detect_client.wait_for_service(timeout_sec=5.0):
+            return [], "Detection service '/vision/detect_objects' not available"
+
+        detect_request = DetectObjects.Request()
+        detect_response = detect_client.call(detect_request)
+
+        if detect_response is None:
+            return [], 'Detection service returned no response'
+        if not detect_response.success:
+            return [], f"Object detection failed: {detect_response.error_message}"
+
+        bboxes: List[List[int]] = []
+        total = int(detect_response.total_detections)
+        for index in range(total):
+            bboxes.append([
+                int(detect_response.bbox_x1[index]),
+                int(detect_response.bbox_y1[index]),
+                int(detect_response.bbox_x2[index]),
+                int(detect_response.bbox_y2[index]),
+            ])
+
+        return bboxes, None
+
+    def _compute_similarity(self, image_bgr: np.ndarray, label: str) -> float:
+        """Compute CLIP cosine similarity between crop and label text."""
+        region_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+        pil_image = PILImage.fromarray(region_rgb)
+        image_input = self.preprocess(pil_image).unsqueeze(0).to(self.device)
+        text_tokens = clip.tokenize([label]).to(self.device)
+
+        with torch.no_grad():
+            image_features = self.model.encode_image(image_input)
+            text_features = self.model.encode_text(text_tokens)
+            image_features = image_features / image_features.norm(dim=-1, keepdim=True)
+            text_features = text_features / text_features.norm(dim=-1, keepdim=True)
+            similarity = (image_features @ text_features.T)[0, 0].item()
+
+        return float(similarity)
+
+    def find_multi_object_callback(self, request, response):
+        """
+        Service callback for /vision/find_multi_object.
+
+        Custom Interface Definition (custom_interfaces/srv/FindMultiObject.srv):
+        # Request
+        string label
+        int32 k
+        ---
+        # Response
+        bool success
+        string message
+        int32[] bboxes        # Flattened as [x1,y1,x2,y2, x1,y1,x2,y2, ...]
+        float32[] confidences # Similarity score for each returned bbox
+        int32 total_matches
+        """
+        try:
+            target_label = request.label.strip()
+            top_k = int(request.k)
+
+            if not target_label:
+                response.success = False
+                response.message = 'Empty label provided'
+                response.bboxes = []
+                response.confidences = []
+                response.total_matches = 0
+                return response
+
+            if top_k <= 0:
+                response.success = False
+                response.message = 'Invalid k: must be >= 1'
+                response.bboxes = []
+                response.confidences = []
+                response.total_matches = 0
+                return response
+
+            if self.captured_frame is None:
+                response.success = False
+                response.message = f'No frame captured yet from {self.rgb_topic}'
+                response.bboxes = []
+                response.confidences = []
+                response.total_matches = 0
+                return response
+
+            if not CLIP_AVAILABLE or self.model is None:
+                response.success = False
+                response.message = 'CLIP model not available'
+                response.bboxes = []
+                response.confidences = []
+                response.total_matches = 0
+                return response
+
+            self.get_logger().info(
+                f"Finding top-{top_k} regions for '{target_label}' by CLIP similarity"
+            )
+
+            bboxes, error_message = self._call_detect_objects()
+            if error_message:
+                response.success = False
+                response.message = error_message
+                response.bboxes = []
+                response.confidences = []
+                response.total_matches = 0
+                return response
+
+            if not bboxes:
+                payload = {
+                    'success': True,
+                    'label': target_label,
+                    'requested_k': top_k,
+                    'total_regions': 0,
+                    'total_matches': 0,
+                    'matches': [],
+                    'timestamp': datetime.utcnow().isoformat() + 'Z',
+                }
+                response.success = True
+                response.message = json.dumps(payload, indent=2)
+                response.bboxes = []
+                response.confidences = []
+                response.total_matches = 0
+                return response
+
+            frame = self.captured_frame
+            frame_h, frame_w = frame.shape[:2]
+            matches: List[Dict] = []
+
+            for region_id, bbox in enumerate(bboxes):
+                x1, y1, x2, y2 = bbox
+                x1 = max(0, min(x1, frame_w))
+                x2 = max(0, min(x2, frame_w))
+                y1 = max(0, min(y1, frame_h))
+                y2 = max(0, min(y2, frame_h))
+
+                if x2 <= x1 or y2 <= y1:
+                    continue
+
+                region_bgr = frame[y1:y2, x1:x2]
+                similarity = self._compute_similarity(region_bgr, target_label)
+                matches.append({
+                    'region_id': region_id,
+                    'bbox': [int(x1), int(y1), int(x2), int(y2)],
+                    'confidence': round(float(similarity), 4),
+                })
+
+            matches.sort(key=lambda item: item['confidence'], reverse=True)
+            top_matches = matches[:top_k]
+            top_matches.sort(key=lambda item: item['bbox'][0])
+
+            payload = {
+                'success': True,
+                'label': target_label,
+                'requested_k': top_k,
+                'total_regions': len(bboxes),
+                'total_matches': len(top_matches),
+                'matches': top_matches,
+                'timestamp': datetime.utcnow().isoformat() + 'Z',
+            }
+
+            response.success = True
+            response.message = json.dumps(payload, indent=2)
+            flattened = []
+            for match in top_matches:
+                flattened.extend(match['bbox'])
+            response.bboxes = flattened
+            response.confidences = [float(match['confidence']) for match in top_matches]
+            response.total_matches = len(top_matches)
+
+            self.get_logger().info(
+                f"Found top {len(top_matches)} matches for '{target_label}' out of {len(bboxes)} regions"
+            )
+
+        except Exception as e:
+            response.success = False
+            response.message = f'Error: {str(e)}'
+            response.bboxes = []
+            response.confidences = []
+            response.total_matches = 0
+            self.get_logger().error(f"Find multi object error: {e}")
+            import traceback
+            self.get_logger().error(traceback.format_exc())
+
+        return response
     
     def find_object_callback(self, request, response):
         """

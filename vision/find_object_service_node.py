@@ -4,7 +4,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
-from custom_interfaces.srv import DetectObjects, FindObject, PixelToReal, FindObjectReal, FindObjectAngleBB
+from custom_interfaces.srv import DetectObjects, FindObject, PixelToReal, FindObjectReal, FindObjectAngleBB, FindMultiObjectReal, FindMultiObject
 
 
 
@@ -37,6 +37,14 @@ class FindObjectServiceNode(Node):
             callback_group=self.callback_group
         )
         
+        # Create service server for /find_multi_object
+        self.find_multi_object_srv = self.create_service(
+            FindMultiObjectReal,
+            '/find_multi_object',
+            self.find_multi_object_callback,
+            callback_group=self.callback_group
+        )
+        
         # Create service clients for calling other services
         self.detect_objects_client = self.create_client(
             DetectObjects,
@@ -47,6 +55,12 @@ class FindObjectServiceNode(Node):
         self.find_object_client = self.create_client(
             FindObject,
             '/vision/find_object',
+            callback_group=self.callback_group
+        )
+        
+        self.find_multi_object_client = self.create_client(
+            FindMultiObject,
+            '/vision/find_multi_object',
             callback_group=self.callback_group
         )
         
@@ -76,6 +90,9 @@ class FindObjectServiceNode(Node):
         
         if not self.find_object_client.wait_for_service(timeout_sec=5.0):
             self.get_logger().warn('/vision/find_object service not available')
+        
+        if not self.find_multi_object_client.wait_for_service(timeout_sec=5.0):
+            self.get_logger().warn('/vision/find_multi_object service not available')
         
         if not self.pixel_to_real_client.wait_for_service(timeout_sec=5.0):
             self.get_logger().warn('/pixel_to_real service not available')
@@ -249,6 +266,151 @@ class FindObjectServiceNode(Node):
             response.y = 0.0
             response.z = 0.0
             response.theta = 0.0
+        
+        return response
+
+
+    def find_multi_object_callback(self, request, response):
+        """
+        Main service callback for /find_multi_object
+        Orchestrates calls to find_multi_object and pixel_to_real for multiple objects
+        """
+        label = request.label
+        top_k = request.k
+        self.get_logger().info(f'Received find_multi_object request for label: {label}, k: {top_k}')
+        
+        try:
+            # Step 1: Call /vision/find_multi_object with the label (synchronously)
+            self.get_logger().info(f'Calling /vision/find_multi_object with label: {label}, k: {top_k}...')
+            find_req = FindMultiObject.Request()
+            find_req.label = label
+            find_req.k = top_k
+            find_response = self.find_multi_object_client.call(find_req)
+            
+            if find_response is None:
+                response.success = False
+                response.message = 'find_multi_object service returned None (service might be unavailable)'
+                response.object_ids = []
+                response.bbox = []
+                response.confidence = []
+                response.x = []
+                response.y = []
+                response.z = []
+                response.theta = []
+                self.get_logger().error('find_multi_object returned None')
+                return response
+            
+            if not find_response.success:
+                response.success = False
+                response.message = f'find_multi_object failed: {find_response.message}'
+                response.object_ids = []
+                response.bbox = []
+                response.confidence = []
+                response.x = []
+                response.y = []
+                response.z = []
+                response.theta = []
+                return response
+            
+            self.get_logger().info(f'Found {find_response.total_matches} objects matching label: {label}')
+            
+            # Step 2: For each bbox, call /obb/find_object_angle_bb to get center and angle, then pixel_to_real
+            response.object_ids = []
+            response.bbox = find_response.bboxes if find_response.bboxes else []
+            response.confidence = find_response.confidences if find_response.confidences else []
+            response.x = []
+            response.y = []
+            response.z = []
+            response.theta = []
+            
+            # Convert flattened bboxes back to list of [x1, y1, x2, y2] for processing
+            bboxes_list = []
+            for i in range(0, len(find_response.bboxes), 4):
+                if i + 3 < len(find_response.bboxes):
+                    bboxes_list.append(find_response.bboxes[i:i+4])
+            
+            for idx, bbox in enumerate(bboxes_list):
+                try:
+                    if len(bbox) < 4:
+                        self.get_logger().warn(f'Invalid bounding box at index {idx}')
+                        response.x.append(0.0)
+                        response.y.append(0.0)
+                        response.z.append(0.0)
+                        response.theta.append(0.0)
+                        continue
+                    
+                    x1, y1, x2, y2 = bbox[:4]
+                    
+                    self.get_logger().info(f'Object {idx}: Calling /obb/find_object_angle_bb with bbox: [{x1}, {y1}, {x2}, {y2}]...')
+                    obb_req = FindObjectAngleBB.Request()
+                    obb_req.x1 = int(x1)
+                    obb_req.y1 = int(y1)
+                    obb_req.x2 = int(x2)
+                    obb_req.y2 = int(y2)
+                    obb_response = self.obb_angle_client.call(obb_req)
+                    
+                    if obb_response is None or not obb_response.success:
+                        self.get_logger().warn(f'obb_angle_bb service failed for object {idx}: {obb_response.message if obb_response else "service unavailable"}')
+                        response.x.append(0.0)
+                        response.y.append(0.0)
+                        response.z.append(0.0)
+                        response.theta.append(0.0)
+                        continue
+                    
+                    u = int(obb_response.u)
+                    v = int(obb_response.v)
+                    theta = float(obb_response.theta)
+                    
+                    self.get_logger().info(f'Object {idx}: OBB center: ({u}, {v}), angle: {theta:.4f} rad')
+                    
+                    # Call /pixel_to_real service (synchronously)
+                    pixel_req = PixelToReal.Request()
+                    pixel_req.u = u
+                    pixel_req.v = v
+                    pixel_response = self.pixel_to_real_client.call(pixel_req)
+                    
+                    if pixel_response is None:
+                        self.get_logger().warn(f'pixel_to_real returned None for object {idx}')
+                        response.x.append(0.0)
+                        response.y.append(0.0)
+                        response.z.append(0.0)
+                        response.theta.append(0.0)
+                        continue
+                    
+                    response.x.append(pixel_response.x)
+                    response.y.append(pixel_response.y)
+                    if self.tcp_offset:
+                        response.z.append(pixel_response.z + TCP_OFFSET)
+                    else:
+                        response.z.append(pixel_response.z)
+                    response.theta.append(theta)
+                    
+                    self.get_logger().info(f'Object {idx} at world coordinates: ({pixel_response.x:.3f}, {pixel_response.y:.3f}, {pixel_response.z:.3f}), angle: {theta:.4f} rad')
+                    
+                except Exception as e:
+                    self.get_logger().error(f'Error processing object {idx}: {str(e)}')
+                    response.x.append(0.0)
+                    response.y.append(0.0)
+                    response.z.append(0.0)
+                    response.theta.append(0.0)
+            
+            # Step 3: Return final response
+            response.success = True
+            response.message = f'Successfully found {len(bboxes_list)} object(s) matching "{label}"'
+            
+            self.get_logger().info(f'Success! Found {len(bboxes_list)} objects')
+            
+        except Exception as e:
+            self.get_logger().error(f'Error in find_multi_object_callback: {str(e)}')
+            response.success = False
+            response.message = f'Internal error: {str(e)}'
+            response.object_ids = []
+            response.bbox = []
+            response.confidence = []
+            response.x = []
+            response.y = []
+            response.z = []
+            response.theta = []
         
         return response
 
