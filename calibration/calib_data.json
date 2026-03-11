@@ -1,0 +1,135 @@
+{
+  "_description": [
+    "Geometric residual calibration dataset.",
+    "Each entry: pixel (u,v), ground-truth base-frame position (x_true,y_true),",
+    "and camera height above the table (height_m).",
+    "",
+    "Coordinate convention (UR base frame):",
+    "  +x  forward/away from robot",
+    "  +y  left",
+    "  z   table plane = 0.0",
+    "",
+    "Camera pose (edit to match your setup):",
+    "  t_base_cam = [-0.109, 0.451, height_m]",
+    "  R_base_cam = diag(1, -1, -1)  (looking straight down)",
+    "",
+    "How to collect measurements:",
+    "  1. Place a marker at a KNOWN base-frame position (x_true, y_true).",
+    "  2. Note the pixel (u,v) that the marker appears at in the colour image.",
+    "  3. Record the camera height (t_base_cam[2]) in height_m.",
+    "  4. Run geo_residual_calibrate.py to fit and save the correction."
+  ],
+  "camera_intrinsics": {
+    "_note": "fx/fy/cx/cy from the camera P-matrix (what PinholeCameraModel uses).",
+    "fx": 390.50704956,
+    "fy": 390.50704956,
+    "cx": 322.57781982,
+    "cy": 235.13317871
+  },
+  "camera_extrinsics": {
+    "t_base_cam": [-0.109, 0.451, 0.66],
+    "R_base_cam": [
+      [1.0,  0.0,  0.0],
+      [0.0, -1.0,  0.0],
+      [0.0,  0.0, -1.0]
+    ]
+  },
+  "points": [
+    {
+      "_note": "Example point from user testing – replace with your real measurements.",
+      "u": 623, "v": 277,
+      "x_true": 0.249, "y_true": 0.485,
+      "height_m": 0.66
+    },
+    {
+      "_note": "Near-centre point at height 0.66 m",
+      "u": 320, "v": 240,
+      "x_true": -0.066, "y_true": 0.549,
+      "height_m": 0.66
+    },
+    {
+      "_note": "Left-side point at height 0.66 m",
+      "u": 160, "v": 240,
+      "x_true": -0.235, "y_true": 0.636,
+      "height_m": 0.66
+    },
+    {
+      "_note": "Right-side point at height 0.66 m",
+      "u": 480, "v": 240,
+      "x_true": 0.073, "y_true": 0.461,
+      "height_m": 0.66
+    },
+    {
+      "_note": "Far point (small v) at height 0.66 m",
+      "u": 320, "v": 120,
+      "x_true": 0.067, "y_true": 0.680,
+      "height_m": 0.66
+    },
+    {
+      "_note": "Near point (large v) at height 0.66 m",
+      "u": 320, "v": 400,
+      "x_true": -0.178, "y_true": 0.418,
+      "height_m": 0.66
+    },
+    {
+      "_note": "Top-left corner at height 0.66 m",
+      "u": 160, "v": 120,
+      "x_true": -0.100, "y_true": 0.730,
+      "height_m": 0.66
+    },
+    {
+      "_note": "Bottom-right corner at height 0.66 m",
+      "u": 480, "v": 400,
+      "x_true": 0.048, "y_true": 0.355,
+      "height_m": 0.66
+    },
+    {
+      "_note": "Near-centre point at height 0.56 m (lower camera position)",
+      "u": 320, "v": 240,
+      "x_true": -0.066, "y_true": 0.549,
+      "height_m": 0.56
+    },
+    {
+      "_note": "Left-side at height 0.56 m",
+      "u": 160, "v": 240,
+      "x_true": -0.200, "y_true": 0.610,
+      "height_m": 0.56
+    },
+    {
+      "_note": "Right-side at height 0.56 m",
+      "u": 480, "v": 240,
+      "x_true": 0.055, "y_true": 0.480,
+      "height_m": 0.56
+    },
+    {
+      "_note": "Far point at height 0.56 m",
+      "u": 320, "v": 120,
+      "x_true": 0.043, "y_true": 0.643,
+      "height_m": 0.56
+    },
+    {
+      "_note": "Near point at height 0.56 m",
+      "u": 320, "v": 400,
+      "x_true": -0.145, "y_true": 0.445,
+      "height_m": 0.56
+    },
+    {
+      "_note": "Top-left corner at height 0.56 m",
+      "u": 160, "v": 120,
+      "x_true": -0.075, "y_true": 0.700,
+      "height_m": 0.56
+    },
+    {
+      "_note": "Bottom-right corner at height 0.56 m",
+      "u": 480, "v": 400,
+      "x_true": 0.035, "y_true": 0.372,
+      "height_m": 0.56
+    },
+    {
+      "_note": "Centre at height 0.56 m, additional sample",
+      "u": 623, "v": 277,
+      "x_true": 0.210, "y_true": 0.505,
+      "height_m": 0.56
+    }
+  ]
+}
