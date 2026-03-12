@@ -27,7 +27,7 @@
     "cy": 235.13317871
   },
   "camera_extrinsics": {
-    "t_base_cam": [-0.109, 0.451, 0.66],
+    "t_base_cam": [-0.0386, 0.5303, 0.55],
     "R_base_cam": [
       [1.0,  0.0,  0.0],
       [0.0, -1.0,  0.0],
@@ -36,100 +36,124 @@
   },
   "points": [
     {
-      "_note": "Example point from user testing – replace with your real measurements.",
-      "u": 623, "v": 277,
-      "x_true": 0.249, "y_true": 0.485,
-      "height_m": 0.66
+      "_note": "Measure_1 TR - height 0.55",
+      "u": 357, "v": 107,
+      "x_true": -0.04, "y_true": 0.67,
+      "height_m": 0.55
     },
     {
-      "_note": "Near-centre point at height 0.66 m",
-      "u": 320, "v": 240,
-      "x_true": -0.066, "y_true": 0.549,
-      "height_m": 0.66
+      "_note": "Measure_1 BL - height 0.55",
+      "u": 231, "v": 246,
+      "x_true": -0.14, "y_true": 0.57,
+      "height_m": 0.55
     },
     {
-      "_note": "Left-side point at height 0.66 m",
-      "u": 160, "v": 240,
-      "x_true": -0.235, "y_true": 0.636,
-      "height_m": 0.66
+      "_note": "Measure_2 TR - height 0.55",
+      "u": 598, "v": 173,
+      "x_true": 0.16, "y_true": 0.606,
+      "height_m": 0.55
     },
     {
-      "_note": "Right-side point at height 0.66 m",
-      "u": 480, "v": 240,
-      "x_true": 0.073, "y_true": 0.461,
-      "height_m": 0.66
+      "_note": "Measure_2 BL - height 0.55",
+      "u": 455, "v": 305,
+      "x_true": 0.065, "y_true": 0.506,
+      "height_m": 0.55
     },
     {
-      "_note": "Far point (small v) at height 0.66 m",
-      "u": 320, "v": 120,
-      "x_true": 0.067, "y_true": 0.680,
-      "height_m": 0.66
+      "_note": "Measure_3 TR - height 0.55",
+      "u": 431, "v": 147,
+      "x_true": 0.038, "y_true": 0.611,
+      "height_m": 0.55
     },
     {
-      "_note": "Near point (large v) at height 0.66 m",
-      "u": 320, "v": 400,
-      "x_true": -0.178, "y_true": 0.418,
-      "height_m": 0.66
+      "_note": "Measure_3 BL - height 0.55",
+      "u": 301, "v": 285,
+      "x_true": -0.056, "y_true": 0.511,
+      "height_m": 0.55
     },
     {
-      "_note": "Top-left corner at height 0.66 m",
-      "u": 160, "v": 120,
-      "x_true": -0.100, "y_true": 0.730,
-      "height_m": 0.66
+      "_note": "Measure_4 TR - height 0.55",
+      "u": 298, "v": 138,
+      "x_true": -0.084, "y_true": 0.630,
+      "height_m": 0.55
     },
     {
-      "_note": "Bottom-right corner at height 0.66 m",
-      "u": 480, "v": 400,
-      "x_true": 0.048, "y_true": 0.355,
-      "height_m": 0.66
+      "_note": "Measure_4 BL - height 0.55",
+      "u": 169, "v": 275,
+      "x_true": -0.176, "y_true": 0.525,
+      "height_m": 0.55
     },
     {
-      "_note": "Near-centre point at height 0.56 m (lower camera position)",
-      "u": 320, "v": 240,
-      "x_true": -0.066, "y_true": 0.549,
-      "height_m": 0.56
+      "_note": "Measure_5 TR - height 0.55",
+      "u": 286, "v": 318,
+      "x_true": -0.096, "y_true": 0.472,
+      "height_m": 0.55
     },
     {
-      "_note": "Left-side at height 0.56 m",
-      "u": 160, "v": 240,
-      "x_true": -0.200, "y_true": 0.610,
-      "height_m": 0.56
+      "_note": "Measure_5 BL - height 0.55",
+      "u": 158, "v": 460,
+      "x_true": -0.186, "y_true": 0.370,
+      "height_m": 0.55
     },
     {
-      "_note": "Right-side at height 0.56 m",
-      "u": 480, "v": 240,
-      "x_true": 0.055, "y_true": 0.480,
-      "height_m": 0.56
+      "_note": "Measure_6 TR - height 0.55",
+      "u": 170, "v": 204,
+      "x_true": -0.195, "y_true": 0.575,
+      "height_m": 0.55
     },
     {
-      "_note": "Far point at height 0.56 m",
-      "u": 320, "v": 120,
-      "x_true": 0.043, "y_true": 0.643,
-      "height_m": 0.56
+      "_note": "Measure_6 BL - height 0.55",
+      "u": 36, "v": 334,
+      "x_true": -0.295, "y_true": 0.48,
+      "height_m": 0.55
     },
     {
-      "_note": "Near point at height 0.56 m",
-      "u": 320, "v": 400,
-      "x_true": -0.145, "y_true": 0.445,
-      "height_m": 0.56
+      "_note": "Measure_7 TR - height 0.55",
+      "u": 569, "v": 209,
+      "x_true": 0.153, "y_true": 0.570,
+      "height_m": 0.55
     },
     {
-      "_note": "Top-left corner at height 0.56 m",
-      "u": 160, "v": 120,
-      "x_true": -0.075, "y_true": 0.700,
-      "height_m": 0.56
+      "_note": "Measure_7 BL - height 0.55",
+      "u": 428, "v": 348,
+      "x_true": 0.059, "y_true": 0.470,
+      "height_m": 0.55
     },
     {
-      "_note": "Bottom-right corner at height 0.56 m",
-      "u": 480, "v": 400,
-      "x_true": 0.035, "y_true": 0.372,
-      "height_m": 0.56
+      "_note": "Measure_8 TR - height 0.55",
+      "u": 589, "v": 92,
+      "x_true": 0.161, "y_true": 0.662,
+      "height_m": 0.55
     },
     {
-      "_note": "Centre at height 0.56 m, additional sample",
-      "u": 623, "v": 277,
-      "x_true": 0.210, "y_true": 0.505,
-      "height_m": 0.56
+      "_note": "Measure_8 BL - height 0.55",
+      "u": 458, "v": 233,
+      "x_true": 0.068, "y_true": 0.562,
+      "height_m": 0.55
+    },
+    {
+      "_note": "Measure_9 TR - height 0.55",
+      "u": 454, "v": 188,
+      "x_true": 0.064, "y_true": 0.585,
+      "height_m": 0.55
+    },
+    {
+      "_note": "Measure_9 BL - height 0.55",
+      "u": 322, "v": 324,
+      "x_true": -0.04, "y_true": 0.485,
+      "height_m": 0.55
+    },
+    {
+      "_note": "Measure_10 TR - height 0.55",
+      "u": 320, "v": 196,
+      "x_true": -0.025, "y_true": 0.583,
+      "height_m": 0.55
+    },
+    {
+      "_note": "Measure_10 BL - height 0.55",
+      "u": 232, "v": 332,
+      "x_true": -0.125, "y_true": 0.48,
+      "height_m": 0.55
     }
   ]
 }

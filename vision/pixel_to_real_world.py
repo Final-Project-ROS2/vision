@@ -83,7 +83,7 @@ class PixelToRealNode(Node):
         # R_base_cam : rotation from camera frame to base frame
         #   Camera looking straight down →
         #     base_x =  cam_x,  base_y = –cam_y,  base_z = –cam_z
-        self.t_base_cam = np.array([-0.109, 0.451, 0.66])
+        self.t_base_cam = np.array([-0.0386, 0.5303, 0.5238])
         self.R_base_cam = np.array([
             [1.0,  0.0,  0.0],
             [0.0, -1.0,  0.0],
