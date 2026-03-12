@@ -51,7 +51,10 @@ class PixelToRealNode(Node):
         #   error = (x - x^, y - y^, z - z^)
         #   t_base_cam_new = t_base_cam_old + error
         # This compensates for calibration errors in the camera position.
-        self.t_base_cam = np.array([-0.0386, 0.5303, 0.5238])
+        # Benchmark:
+        # LOW: (-0.0386, 0.5303, 0.5238)
+        # HIGH: (-0.0361, 0.5303, 0.6458)
+        self.t_base_cam = np.array([-0.0361, 0.5303, 0.6458])
 
         self.R_base_cam = np.array([
             [1.0,  0.0,  0.0],
