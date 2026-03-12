@@ -45,7 +45,7 @@ class PixelToRealNode(Node):
         self.depth_scale = 0.001  # mm to meters
 
         # ---- Camera Pose in base_link ----
-        self.t_base_cam = np.array([-0.0386, 0.5303, 0.5238]) #0.0027, 0.5442, 0.6711
+        self.t_base_cam = np.array([-0.0361, 0.5303, 0.6458]) #0.0027, 0.5442, 0.6711
 # 0.6371
 # -0.0109, 0.5429, 0.6701
 # -0.0386, 0.5303, 0.5238
@@ -109,16 +109,18 @@ class PixelToRealNode(Node):
     def _compute_empirical_estimate(self, u, v):
         """
         METHOD 2: Empirical calibration using least-squares fitted coefficients.
-        Coefficients fitted from 20 calibration points across the image.
-        Camera coordinate: [-0.0386, 0.5303, 0.5238]
+        Coefficients fitted from 20 calibration points (10 measurements x 2 points each).
+        Calibration date: March 12, 2026
+        Camera coordinate: [-0.0361, 0.5303, 0.6458]
+        Height: 0.67 m
         
         Fitted coefficients (RMS errors):
-        X = -0.347796 + 0.000859*u + 0.000076*v   (RMS error: ~11.4 mm)
-        Y = 0.746561 - 0.000010*u - 0.000801*v    (RMS error: ~8.7 mm)
-        Overall 2D RMS error: ~14.4 mm
+        X = -0.313151 + 0.000949*u - 0.000051*v   (RMS error: ~35.8 mm)
+        Y = 0.821247 - 0.000062*u - 0.001042*v    (RMS error: ~5.84 mm)
+        Overall 2D RMS error: ~36.27 mm
         """
-        x_calib = -0.347796 + 0.000859 * u + 0.000076 * v
-        y_calib = 0.746561 - 0.000010 * u - 0.000801 * v
+        x_calib = -0.313151 + 0.000949 * u - 0.000051 * v
+        y_calib = 0.821247 - 0.000062 * u - 0.001042 * v
         z_calib = -0.002  # Assume table height for now
         
         return np.array([x_calib, y_calib, z_calib])
