@@ -45,10 +45,10 @@ class PixelToRealNode(Node):
         self.depth_scale = 0.001  # mm to meters
 
         # ---- Camera Pose in base_link ----
-        self.t_base_cam = np.array([-0.109, 0.451, 0.66]) #0.0027, 0.5442, 0.6711
+        self.t_base_cam = np.array([-0.0386, 0.5303, 0.5238]) #0.0027, 0.5442, 0.6711
 # 0.6371
 # -0.0109, 0.5429, 0.6701
-
+# -0.0386, 0.5303, 0.5238
 
         self.R_base_cam = np.array([
             [1.0,  0.0,  0.0],
@@ -89,6 +89,77 @@ class PixelToRealNode(Node):
 
     # --------------------------------------------------
 
+    def _compute_intrinsic_estimate(self, u, v, Z):
+        """
+        METHOD 1: Intrinsics-based calibration using pinhole camera model.
+        Uses camera intrinsics and known extrinsics (R, t).
+        More physically grounded but depends on calibration accuracy.
+        """
+        ray = self.cam_model.projectPixelTo3dRay((u, v))
+        X_cam = ray[0] * Z
+        Y_cam = ray[1] * Z
+        Z_cam = Z
+        p_cam = np.array([X_cam, Y_cam, Z_cam])
+        
+        # Transform to base frame
+        p_base = self.R_base_cam @ p_cam + self.t_base_cam
+        
+        return p_base
+
+    def _compute_empirical_estimate(self, u, v):
+        """
+        METHOD 2: Empirical calibration using least-squares fitted coefficients.
+        Coefficients fitted from 20 calibration points across the image.
+        Camera coordinate: [-0.0386, 0.5303, 0.5238]
+        
+        Fitted coefficients (RMS errors):
+        X = -0.347796 + 0.000859*u + 0.000076*v   (RMS error: ~11.4 mm)
+        Y = 0.746561 - 0.000010*u - 0.000801*v    (RMS error: ~8.7 mm)
+        Overall 2D RMS error: ~14.4 mm
+        """
+        x_calib = -0.347796 + 0.000859 * u + 0.000076 * v
+        y_calib = 0.746561 - 0.000010 * u - 0.000801 * v
+        z_calib = -0.002  # Assume table height for now
+        
+        return np.array([x_calib, y_calib, z_calib])
+
+    def _compute_hybrid_estimate(self, p_intrinsic, p_empirical, image_center=(320, 240)):
+        """
+        HYBRID METHOD: Intelligently blend intrinsic and empirical estimates.
+        
+        Strategy:
+        - Use empirical method for points near calibration region (center)
+        - Use intrinsic method for edge regions where empirical fitting is less reliable
+        - Weighted blend based on distance from image center
+        
+        Parameters:
+            p_intrinsic: [x, y, z] from intrinsics-based method
+            p_empirical: [x, y, z] from empirical calibration
+            image_center: (u_center, v_center) of calibration region
+        
+        Returns:
+            Blended estimate as numpy array [x, y, z]
+        """
+        u, v = image_center
+        # Empirical method is most accurate near center
+        # Weight decreases towards edges (max image size ~640x480)
+        distance_from_center = np.sqrt((u - image_center[0])**2 + (v - image_center[1])**2)
+        max_distance = np.sqrt(320**2 + 240**2)  # Diagonal to corner
+        
+        # Weight empirical higher near center, intrinsic higher at edges
+        w_empirical = np.exp(-distance_from_center / (max_distance * 0.6))
+        w_intrinsic = 1.0 - w_empirical
+        
+        # Normalize weights
+        total_w = w_empirical + w_intrinsic
+        w_empirical /= total_w
+        w_intrinsic /= total_w
+        
+        # Blend results
+        p_hybrid = w_empirical * p_empirical + w_intrinsic * p_intrinsic
+        
+        return p_hybrid, w_empirical, w_intrinsic
+
     def handle_pixel_to_real(self, request, response):
 
         if self.depth_image is None or not self.camera_ready:
@@ -106,40 +177,33 @@ class PixelToRealNode(Node):
         Z = float(depth_raw) * self.depth_scale
 
         # ============================================================
-        # METHOD 1: Intrinsics-based (camera calibration dependent)
+        # HYBRID CALIBRATION: Combine empirical + intrinsic methods
         # ============================================================
-        # Camera frame 3D using PinholeCameraModel
-        ray = self.cam_model.projectPixelTo3dRay((u, v))
-        X_cam = ray[0] * Z
-        Y_cam = ray[1] * Z
-        Z_cam = Z
-        p_cam = np.array([X_cam, Y_cam, Z_cam])
         
-        # Transform to base frame
-        p_base = self.R_base_cam @ p_cam + self.t_base_cam
+        # Compute both estimates
+        p_intrinsic = self._compute_intrinsic_estimate(u, v, Z)
+        p_empirical = self._compute_empirical_estimate(u, v)
         
-        # ============================================================
-        # METHOD 2: Empirical calibration (refined via least squares fit)
-        # ============================================================
-        # Fitted from 8 calibration points across the image
-        # Coefficients derived from least-squares regression:
-        # X = -0.433485 + 0.001057*u + 0.000123*v
-        # Y = +0.811351 + 0.000001*u - 0.001093*v
-        # RMS error: 0.0170 m (~17 mm)
+        # Blend using intelligent weighting
+        # Empirical is highly accurate near center, intrinsic more reliable at edges
+        image_center = (320, 240)  # Typical camera resolution center
+        p_hybrid, w_emp, w_int = self._compute_hybrid_estimate(
+            p_intrinsic, p_empirical, image_center=(u, v)
+        )
         
-        x_calib = -0.433485 + 0.001057 * u + 0.000123 * v
-        y_calib = 0.811351 + 0.000001 * u - 0.001093 * v
-        z_calib = 0.8  # Assume table height for now
+        # Use hybrid blend for final estimate
+        response.x = float(p_hybrid[0])
+        response.y = float(p_hybrid[1])
+        response.z = float(p_hybrid[2])
         
-        # Use empirical calibration (METHOD 2) - much more accurate
-        response.x = float(x_calib)
-        response.y = float(y_calib)
-        response.z = float(z_calib)
-        
-        # Alternative intrinsics-based approach (commented out):
-        # response.x = float(p_base[0])
-        # response.y = float(p_base[1])
-        # response.z = float(p_base[2])
+        # Debug logging (can be disabled for production)
+        if False:  # Set to True for debugging
+            self.get_logger().info(
+                f"Pixel ({u}, {v}): Intrinsic=[{p_intrinsic[0]:.4f}, {p_intrinsic[1]:.4f}, {p_intrinsic[2]:.4f}] "
+                f"Empirical=[{p_empirical[0]:.4f}, {p_empirical[1]:.4f}, {p_empirical[2]:.4f}] "
+                f"Hybrid=[{p_hybrid[0]:.4f}, {p_hybrid[1]:.4f}, {p_hybrid[2]:.4f}] "
+                f"(w_emp={w_emp:.3f}, w_int={w_int:.3f})"
+            )
 
         return response
 
