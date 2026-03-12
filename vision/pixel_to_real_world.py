@@ -45,7 +45,13 @@ class PixelToRealNode(Node):
         self.depth_scale = 0.001  # mm to meters
 
         # ---- Camera Pose in base_link ----
-        self.t_base_cam = np.array([0.0027, 0.5442, 0.54])
+        # Translation vector from base_link to camera frame
+        # To adjust based on experiments:
+        # If pixel_to_real returns (x^, y^, z^) but actual coordinate is (x, y, z):
+        #   error = (x - x^, y - y^, z - z^)
+        #   t_base_cam_new = t_base_cam_old + error
+        # This compensates for calibration errors in the camera position.
+        self.t_base_cam = np.array([-0.0386, 0.5303, 0.5238])
 
         self.R_base_cam = np.array([
             [1.0,  0.0,  0.0],
