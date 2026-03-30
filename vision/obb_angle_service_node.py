@@ -37,6 +37,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
+from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 from custom_interfaces.srv import FindObjectAngleBB, FindObjectAngle, DetectObjects
 from custom_interfaces.msg import SAMDetections
 from sensor_msgs.msg import Image, CameraInfo
@@ -44,6 +45,7 @@ from cv_bridge import CvBridge
 import numpy as np
 import cv2
 import time
+import threading
 
 
 class OBBAngleServiceNode(Node):
@@ -55,8 +57,10 @@ class OBBAngleServiceNode(Node):
     def __init__(self):
         super().__init__('obb_angle_service_node')
         
-        # Use reentrant callback group for nested service calls
-        self.callback_group = ReentrantCallbackGroup()
+        # Keep subscriptions and services in separate callback groups so
+        # detection updates can be processed while service callbacks are waiting.
+        self.subscription_callback_group = ReentrantCallbackGroup()
+        self.service_callback_group = ReentrantCallbackGroup()
         
         # Storage for latest detections and images
         self.latest_detections = None
@@ -66,8 +70,13 @@ class OBBAngleServiceNode(Node):
         self.bridge = CvBridge()
         
         # Thread lock for thread-safe access
-        import threading
         self.detections_lock = threading.Lock()
+        self.detections_condition = threading.Condition(self.detections_lock)
+        self.latest_detections_stamp_ns = 0
+
+        # Queue visualization work so service callbacks can return immediately.
+        self.viz_lock = threading.Lock()
+        self.pending_viz = None
         
         # OpenCV visualization window (unified for both single and multi-object)
         self.window_name = 'OBB Angle Detection'
@@ -80,13 +89,21 @@ class OBBAngleServiceNode(Node):
             self.rgb_topic = '/camera/color/image_raw'
         else:
             self.rgb_topic = '/camera/image_raw'
+
+        # Best-effort QoS is generally more compatible with high-rate detector topics.
+        self.sam_qos = QoSProfile(
+            depth=10,
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            durability=DurabilityPolicy.VOLATILE,
+        )
         
         # Subscribe to RGB camera for visualization
         self.rgb_subscription = self.create_subscription(
             Image,
             self.rgb_topic,
             self.rgb_callback,
-            10
+            10,
+            callback_group=self.subscription_callback_group,
         )
         
         # Subscribe to SAM detections for multi-object OBB
@@ -94,7 +111,8 @@ class OBBAngleServiceNode(Node):
             SAMDetections,
             '/vision/sam_detections',
             self.sam_detections_callback,
-            10
+            self.sam_qos,
+            callback_group=self.subscription_callback_group,
         )
         
         # Subscribe to depth camera
@@ -102,7 +120,8 @@ class OBBAngleServiceNode(Node):
             Image,
             "/camera/depth/image_rect_raw",
             self.depth_callback,
-            10
+            10,
+            callback_group=self.subscription_callback_group,
         )
         
         # Subscribe to camera info
@@ -110,14 +129,15 @@ class OBBAngleServiceNode(Node):
             CameraInfo,
             "/camera/color/camera_info",
             self.info_callback,
-            10
+            10,
+            callback_group=self.subscription_callback_group,
         )
         
         # Service client for real-time detection
         self.detect_objects_client = self.create_client(
             DetectObjects,
             '/vision/detect_objects',
-            callback_group=self.callback_group
+            callback_group=self.service_callback_group
         )
         
         # Create OBB angle service servers
@@ -125,14 +145,14 @@ class OBBAngleServiceNode(Node):
             FindObjectAngleBB,
             '/obb/find_object_angle_bb',
             self.find_object_angle_bb_callback,
-            callback_group=self.callback_group
+            callback_group=self.service_callback_group
         )
         
         self.find_object_angle_srv = self.create_service(
             FindObjectAngle,
             '/obb/find_object_angle',
             self.find_object_angle_callback,
-            callback_group=self.callback_group
+            callback_group=self.service_callback_group
         )
         
         # Create OpenCV window (unified)
@@ -152,6 +172,7 @@ class OBBAngleServiceNode(Node):
         self.get_logger().info('  - /obb/find_object_angle (All objects OBB)')
         self.get_logger().info('Subscriptions:')
         self.get_logger().info('  - /vision/sam_detections (SAMDetections)')
+        self.get_logger().info('  - /vision/sam_detections QoS: BEST_EFFORT, VOLATILE, depth=10')
         self.get_logger().info(f'  - {self.rgb_topic} (Image)')
         self.get_logger().info('  - /camera/depth/image_rect_raw (Image)')
         self.get_logger().info('  - /camera/color/camera_info (CameraInfo)')
@@ -177,9 +198,28 @@ class OBBAngleServiceNode(Node):
     
     def sam_detections_callback(self, msg: SAMDetections):
         """Store latest SAM detections"""
-        with self.detections_lock:
+        with self.detections_condition:
             self.latest_detections = msg
+            self.latest_detections_stamp_ns = time.monotonic_ns()
+            self.detections_condition.notify_all()
+            if not hasattr(self, '_sam_received'):
+                self._sam_received = True
+                self.get_logger().info(f'First SAM detections received: {msg.total_detections} objects')
             self.get_logger().debug(f'Received SAM detections: {msg.total_detections} objects')
+
+    def wait_for_sam_detections(self, timeout_sec=1.5, min_stamp_ns=0):
+        """Wait until at least one SAM detection message is available."""
+        deadline = time.monotonic() + timeout_sec
+        with self.detections_condition:
+            while True:
+                if self.latest_detections is not None and self.latest_detections_stamp_ns >= min_stamp_ns:
+                    return True
+
+                remaining = deadline - time.monotonic()
+                if remaining <= 0.0:
+                    return False
+
+                self.detections_condition.wait(timeout=min(0.05, remaining))
     
     def depth_callback(self, msg: Image):
         """Store latest depth image"""
@@ -194,9 +234,28 @@ class OBBAngleServiceNode(Node):
     
     def keep_window_alive(self):
         """Timer callback to keep OpenCV window responsive"""
-        # This just calls waitKey to process window events
-        # Without this, the window may freeze or not display properly
-        cv2.waitKey(1)
+        # Render queued visualization outside service callbacks to avoid
+        # blocking service responses on GUI operations.
+        pending = None
+        with self.viz_lock:
+            if self.pending_viz is not None:
+                pending = self.pending_viz
+                self.pending_viz = None
+
+        if pending is not None:
+            results, mode = pending
+            try:
+                self.visualize_obb(results, mode=mode)
+            except Exception as e:
+                self.get_logger().warn(f'Visualization update failed: {e}')
+        else:
+            # Process window events even when no new frame is queued.
+            cv2.waitKey(1)
+
+    def queue_visualization(self, results, mode="auto"):
+        """Queue the latest visualization payload for timer-based rendering."""
+        with self.viz_lock:
+            self.pending_viz = (results, mode)
     
     def calculate_obb_from_bbox(self, x1, y1, x2, y2, mask=None):
         """
@@ -552,11 +611,15 @@ class OBBAngleServiceNode(Node):
                 return response
             
             # Trigger real-time detection to get fresh detections
+            request_stamp_ns = time.monotonic_ns()
             self.get_logger().info('Triggering real-time detection...')
             detection_success = self.trigger_real_time_detection()
-            
-            # Small delay to ensure detections are updated
-            time.sleep(0.1)
+            min_stamp_ns = request_stamp_ns if detection_success else 0
+
+            # Wait for SAM callback instead of fixed sleep.
+            got_sam = self.wait_for_sam_detections(timeout_sec=1.5, min_stamp_ns=min_stamp_ns)
+            if not got_sam:
+                self.get_logger().warn('Timed out waiting for SAM detections update')
             
             # Get latest detections
             with self.detections_lock:
@@ -649,9 +712,9 @@ class OBBAngleServiceNode(Node):
             self.get_logger().info(f'OBB Result ({best_detection.object_id}): center=({u:.1f},{v:.1f}), angle={angle_deg:.1f}deg, size={width:.0f}x{height:.0f}')
             self.get_logger().info('=' * 60)
             
-            # Visualize with unified function - pass the INPUT bbox from request for visualization
+            # Queue visualization; do not block service response path.
             viz_data = [(best_detection.object_id, u, v, theta_geom, width, height, [request.x1, request.y1, request.x2, request.y2])]
-            self.visualize_obb(viz_data, mode="single")
+            self.queue_visualization(viz_data, mode="single")
             
         except Exception as e:
             self.get_logger().error(f'Error in find_object_angle_bb: {e}')
@@ -678,11 +741,15 @@ class OBBAngleServiceNode(Node):
         
         try:
             # Trigger real-time detection
+            request_stamp_ns = time.monotonic_ns()
             self.get_logger().info('Triggering real-time detection for all objects...')
             detection_success = self.trigger_real_time_detection()
-            
-            # Small delay to ensure detections are updated
-            time.sleep(0.1)
+            min_stamp_ns = request_stamp_ns if detection_success else 0
+
+            # Wait for SAM callback instead of fixed sleep.
+            got_sam = self.wait_for_sam_detections(timeout_sec=1.5, min_stamp_ns=min_stamp_ns)
+            if not got_sam:
+                self.get_logger().warn('Timed out waiting for SAM detections update')
             
             # Get latest detections
             with self.detections_lock:
@@ -791,7 +858,7 @@ class OBBAngleServiceNode(Node):
             
             # Visualize all objects with unified function
             if len(viz_results) > 0:
-                self.visualize_obb(viz_results, mode="multi")
+                self.queue_visualization(viz_results, mode="multi")
             
         except Exception as e:
             self.get_logger().error(f'Error in find_object_angle: {e}')
@@ -822,7 +889,7 @@ def main(args=None):
     node = OBBAngleServiceNode()
     
     # Use MultiThreadedExecutor for non-blocking service calls
-    executor = MultiThreadedExecutor()
+    executor = MultiThreadedExecutor(num_threads=4)
     executor.add_node(node)
     
     try:

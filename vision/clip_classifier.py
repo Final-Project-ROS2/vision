@@ -51,7 +51,6 @@ from cv_bridge import CvBridge
 import cv2
 import numpy as np
 import sys
-import os
 import json
 from datetime import datetime
 from typing import List, Dict, Tuple, Optional
@@ -278,12 +277,8 @@ class CLIPClassifier(Node):
             )
             self.get_logger().warn("Subscribing to: /vision/sam_detections (placeholder Image). Build msgs for full integration.")
         
-        # Mitigate OpenCV Qt backend font path issues in virtual environments.
-        self._configure_opencv_qt_fonts()
-
         # OpenCV window setup
         self.window_name = f"CLIP Classifier - {self.rgb_topic}"
-        cv2.startWindowThread()
         cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL)
         cv2.resizeWindow(self.window_name, 800, 600)
         
@@ -305,29 +300,6 @@ class CLIPClassifier(Node):
         self.get_logger().info("Service: /vision/find_multi_object")
         self.get_logger().info(f"Subscriber: /vision/sam_detections (auto-classify on SAM publish)")
         self.get_logger().info(f"OpenCV Window: '{self.window_name}'")
-
-    def _configure_opencv_qt_fonts(self):
-        """Set a valid Qt font directory when OpenCV's bundled qt/fonts folder is missing."""
-        if os.environ.get('QT_QPA_FONTDIR'):
-            return
-
-        candidate_dirs = [
-            '/usr/share/fonts/truetype/dejavu',
-            '/usr/share/fonts/truetype/freefont',
-            '/usr/share/fonts/truetype/liberation2',
-            '/usr/share/fonts',
-        ]
-
-        for font_dir in candidate_dirs:
-            if os.path.isdir(font_dir):
-                os.environ['QT_QPA_FONTDIR'] = font_dir
-                self.get_logger().info(f"Set QT_QPA_FONTDIR to {font_dir}")
-                return
-
-        self.get_logger().warn(
-            "Could not find a system font directory for QT_QPA_FONTDIR. "
-            "OpenCV Qt warnings may appear."
-        )
     
     def _init_clip_model(self):
         """Initialize CLIP model"""
@@ -1576,10 +1548,16 @@ def main(args=None):
     
     try:
         node = CLIPClassifier(candidate_labels=candidate_labels)
-
-        # Keep OpenCV HighGUI operations on the main thread for stable rendering.
-        rclpy.spin(node)
-        node.destroy_node()
+        
+        # Use MultiThreadedExecutor for ReentrantCallbackGroup
+        executor = MultiThreadedExecutor()
+        executor.add_node(node)
+        
+        try:
+            executor.spin()
+        finally:
+            executor.shutdown()
+            node.destroy_node()
     except KeyboardInterrupt:
         pass
     finally:
