@@ -282,8 +282,9 @@ class CLIPClassifier(Node):
         cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL)
         cv2.resizeWindow(self.window_name, 800, 600)
         
-        # Timer for visualization (30 Hz)
-        self.viz_timer = self.create_timer(0.033, self.visualization_callback)
+        # GUI updates are pumped from the main thread in main() to avoid
+        # HighGUI freezes under multi-threaded executors.
+        self.viz_timer = None
         
         self.get_logger().info("CLIP Classifier Started")
         self.get_logger().info(f"Subscribing to: {self.rgb_topic}")
@@ -1550,11 +1551,13 @@ def main(args=None):
         node = CLIPClassifier(candidate_labels=candidate_labels)
         
         # Use MultiThreadedExecutor for ReentrantCallbackGroup
-        executor = MultiThreadedExecutor()
+        executor = MultiThreadedExecutor(num_threads=4)
         executor.add_node(node)
         
         try:
-            executor.spin()
+            while rclpy.ok():
+                executor.spin_once(timeout_sec=0.03)
+                node.visualization_callback()
         finally:
             executor.shutdown()
             node.destroy_node()

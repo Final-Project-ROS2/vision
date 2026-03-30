@@ -159,8 +159,9 @@ class OBBAngleServiceNode(Node):
         cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL)
         cv2.resizeWindow(self.window_name, 1200, 800)
         
-        # Create timer for continuous window update (keeps window responsive)
-        self.viz_timer = self.create_timer(0.1, self.keep_window_alive)
+        # GUI updates are pumped from the main thread in main() to avoid
+        # HighGUI freezes under multi-threaded executors.
+        self.viz_timer = None
         
         self.get_logger().info('=' * 80)
         self.get_logger().info('OBB Angle Service Node Started')
@@ -894,10 +895,13 @@ def main(args=None):
     
     try:
         node.get_logger().info('OBB Angle Service Node spinning...')
-        executor.spin()
+        while rclpy.ok():
+            executor.spin_once(timeout_sec=0.03)
+            node.keep_window_alive()
     except KeyboardInterrupt:
         node.get_logger().info('Shutting down OBB Angle Service Node...')
     finally:
+        executor.shutdown()
         cv2.destroyAllWindows()
         node.destroy_node()
         rclpy.shutdown()
