@@ -1,0 +1,1049 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Object Explorer — Vision Research Dashboard</title>
+    <style>
+        /* ── Design tokens (same palette as main dashboard) ─────────── */
+        :root {
+            --bg:            #f1f5f9;
+            --surface:       #ffffff;
+            --border:        #e2e8f0;
+            --text-primary:  #0f172a;
+            --text-secondary:#64748b;
+            --text-muted:    #94a3b8;
+
+            --color-sam:    #8b5cf6;
+            --color-clip:   #ec4899;
+            --color-grasp:  #f59e0b;
+            --color-obb:    #f97316;
+            --color-scene:  #10b981;
+            --color-obj:    #6366f1;
+
+            --ok:   #22c55e;
+            --warn: #f59e0b;
+            --fail: #ef4444;
+
+            --nav-bg:   #0f172a;
+            --nav-text: #94a3b8;
+            --radius:   10px;
+            --radius-sm:6px;
+            --shadow:   0 1px 3px rgba(0,0,0,.08);
+        }
+
+        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: var(--bg);
+            color: var(--text-primary);
+            font-size: 13px;
+            line-height: 1.45;
+            display: flex;
+            min-height: 100vh;
+        }
+
+        /* ── Sidebar ──────────────────────────────────────────────────── */
+        #sidebar {
+            width: 226px; min-width: 226px;
+            background: var(--nav-bg);
+            position: fixed; top: 0; left: 0;
+            height: 100vh; z-index: 100;
+            display: flex; flex-direction: column;
+            overflow-y: auto;
+        }
+        .sb-brand { padding: 22px 18px 14px; border-bottom: 1px solid rgba(255,255,255,.07); }
+        .sb-brand-title { font-size: 13px; font-weight: 700; color: #fff; line-height: 1.35; }
+        .sb-brand-sub   { font-size: 11px; color: var(--nav-text); margin-top: 4px; }
+
+        .sb-group {
+            font-size: 10px; font-weight: 700; text-transform: uppercase;
+            letter-spacing: 1.1px; color: rgba(255,255,255,.22);
+            padding: 16px 18px 6px;
+        }
+        .sb-link {
+            display: flex; align-items: center; gap: 10px;
+            padding: 8px 18px; color: var(--nav-text);
+            font-size: 12.5px; font-weight: 500; cursor: pointer;
+            border-left: 3px solid transparent;
+            transition: background .12s, color .12s;
+            text-decoration: none;
+        }
+        .sb-link:hover { background: rgba(255,255,255,.06); color: #fff; }
+        .sb-link.active { border-left-color: var(--color-obj); color: #fff; background: rgba(99,102,241,.12); }
+        .sb-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+        .sb-count {
+            margin-left: auto; font-size: 11px; font-weight: 600;
+            background: rgba(255,255,255,.09); padding: 1px 7px;
+            border-radius: 10px; color: rgba(255,255,255,.45);
+            min-width: 24px; text-align: center;
+        }
+
+        /* ── Main ─────────────────────────────────────────────────────── */
+        #main { margin-left: 226px; flex: 1; min-width: 0; display: flex; flex-direction: column; }
+
+        /* ── Topbar ───────────────────────────────────────────────────── */
+        #topbar {
+            background: var(--surface);
+            border-bottom: 1px solid var(--border);
+            padding: 12px 24px;
+            display: flex; align-items: center; gap: 12px;
+            position: sticky; top: 0; z-index: 90;
+            box-shadow: var(--shadow);
+            flex-wrap: wrap;
+            row-gap: 8px;
+        }
+        .tb-title { font-size: 15px; font-weight: 700; }
+        .tb-sub   { font-size: 11px; color: var(--text-secondary); margin-top: 1px; }
+
+        .ctrl-sep { width: 1px; height: 22px; background: var(--border); margin: 0 4px; }
+        .ctrl-label {
+            font-size: 10.5px; font-weight: 700; text-transform: uppercase;
+            letter-spacing: .5px; color: var(--text-secondary);
+        }
+
+        select, input[type="text"] {
+            border: 1px solid var(--border); border-radius: var(--radius-sm);
+            padding: 5px 10px; font-size: 12.5px;
+            color: var(--text-primary); background: var(--bg); outline: none;
+            transition: border .12s;
+        }
+        select:focus, input[type="text"]:focus { border-color: var(--color-obj); }
+
+        .btn {
+            padding: 5px 13px; border-radius: var(--radius-sm);
+            font-size: 12px; font-weight: 500; cursor: pointer;
+            border: 1px solid var(--border); background: var(--surface);
+            color: var(--text-secondary); transition: all .12s;
+            white-space: nowrap;
+        }
+        .btn:hover { background: var(--bg); color: var(--text-primary); }
+        .btn-primary {
+            background: var(--color-obj); color: #fff;
+            border-color: var(--color-obj);
+        }
+        .btn-primary:hover { background: #4f46e5; border-color: #4f46e5; }
+        .btn-green  { background: var(--ok); color: #fff; border-color: var(--ok); }
+        .btn-green:hover { background: #16a34a; }
+
+        .tb-right { margin-left: auto; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+
+        /* ── Page body ────────────────────────────────────────────────── */
+        .page-body { padding: 18px 24px; flex: 1; }
+
+        /* ── Summary pills ────────────────────────────────────────────── */
+        .summary-strip {
+            display: flex; gap: 10px; margin-bottom: 16px; flex-wrap: wrap;
+        }
+        .summary-pill {
+            background: var(--surface); border: 1px solid var(--border);
+            border-radius: 20px; padding: 5px 14px;
+            font-size: 12px; font-weight: 500;
+            display: flex; align-items: center; gap: 7px;
+        }
+        .pill-dot  { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+        .pill-val  { font-size: 15px; font-weight: 700; color: var(--text-primary); }
+        .pill-lbl  { color: var(--text-secondary); }
+
+        /* ── Section card ────────────────────────────────────────────── */
+        .section-card {
+            background: var(--surface); border: 1px solid var(--border);
+            border-radius: var(--radius); box-shadow: var(--shadow);
+            overflow: hidden;
+        }
+
+        /* ── Table ────────────────────────────────────────────────────── */
+        .table-wrap {
+            overflow: auto;
+            max-height: calc(100vh - 230px);
+        }
+        .table-wrap::-webkit-scrollbar { width: 5px; height: 5px; }
+        .table-wrap::-webkit-scrollbar-track { background: transparent; }
+        .table-wrap::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
+        .table-wrap::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+
+        table {
+            width: max-content;
+            min-width: 100%;
+            border-collapse: separate;
+            border-spacing: 0;
+            font-size: 12.5px;
+        }
+
+        /* Column group header row */
+        tr.cg-row th {
+            position: sticky; top: 0; z-index: 25;
+            padding: 5px 6px;
+            text-align: center;
+            font-size: 10px; font-weight: 800; text-transform: uppercase;
+            letter-spacing: .9px;
+            background: var(--surface);
+            border-bottom: 3px solid currentColor;
+            white-space: nowrap;
+        }
+        .cg-obj   { color: var(--color-obj); }
+        .cg-sam   { color: var(--color-sam); }
+        .cg-clip  { color: var(--color-clip); }
+        .cg-grasp { color: var(--color-grasp); }
+        .cg-obb   { color: var(--color-obb); }
+        .cg-scene { color: var(--color-scene); }
+
+        /* Column header row */
+        tr.ch-row th {
+            position: sticky; top: 27px; z-index: 24;
+            background: #f8fafc;
+            color: var(--text-secondary);
+            font-size: 10.5px; font-weight: 700;
+            text-transform: uppercase; letter-spacing: .6px;
+            padding: 7px 10px;
+            text-align: left;
+            border-bottom: 2px solid var(--border);
+            white-space: nowrap;
+            cursor: pointer; user-select: none;
+        }
+        tr.ch-row th:hover { background: #eef2f7; color: var(--text-primary); }
+        .sort-icon { margin-left: 3px; font-size: 9px; opacity: .35; }
+        th.sort-asc  .sort-icon,
+        th.sort-desc .sort-icon { opacity: 1; }
+
+        /* Sticky left columns */
+        .sc1 { position: sticky; left: 0;    z-index: 10; background: var(--surface); box-shadow: 2px 0 5px rgba(0,0,0,.04); min-width:148px; max-width:148px; }
+        .sc2 { position: sticky; left: 148px; z-index: 9;  background: var(--surface); min-width:96px; max-width:96px; }
+        .sc3 { position: sticky; left: 244px; z-index: 9;  background: var(--surface); min-width:56px; max-width:56px; }
+        thead .sc1 { z-index: 35; background: var(--surface); }
+        thead .sc2 { z-index: 34; background: #f8fafc; }
+        thead .sc3 { z-index: 34; background: #f8fafc; }
+        tr.cg-row .sc1 { background: var(--surface); z-index: 36; }
+
+        td {
+            padding: 9px 10px;
+            border-bottom: 1px solid #f1f5f9;
+            vertical-align: middle;
+            white-space: nowrap;
+        }
+        tbody tr:hover td { background: #fafbff; }
+        tbody tr:hover .sc1 { background: #f4f7ff; }
+        tbody tr:hover .sc2,
+        tbody tr:hover .sc3 { background: #f4f7ff; }
+
+        /* Group separator */
+        tr.group-row td {
+            background: #f8fafc;
+            border-top: 2px solid var(--border);
+            border-bottom: 1px solid var(--border);
+            padding: 5px 12px;
+            position: sticky; left: 0;
+        }
+        .group-label { font-weight: 700; font-size: 12px; color: var(--text-primary); margin-right: 10px; }
+
+        /* No data row */
+        tr.no-data td {
+            text-align: center; padding: 44px 20px;
+            color: var(--text-muted); font-style: italic;
+        }
+        tr.no-data code {
+            font-style: normal; font-size: 11.5px;
+            background: #f1f5f9; padding: 1px 6px; border-radius: 4px;
+            color: var(--text-secondary);
+        }
+
+        /* Editable name cell */
+        .name-cell { display: flex; align-items: center; gap: 5px; }
+        .name-val  { flex:1; font-weight:600; overflow:hidden; text-overflow:ellipsis; max-width:110px; }
+        .name-val.empty { color:var(--text-muted); font-weight:400; font-style:italic; }
+        .edit-btn {
+            opacity: 0; background: none; border: none; cursor: pointer;
+            font-size: 11px; color: var(--text-muted); padding: 1px 4px;
+            border-radius: 3px; transition: opacity .12s, background .12s;
+            flex-shrink: 0;
+        }
+        td:hover .edit-btn, .edit-btn:focus { opacity: 1; }
+        .edit-btn:hover { background: #f1f5f9; color: var(--color-obj); }
+        .name-input {
+            border: 1px solid var(--color-obj); border-radius: 4px;
+            padding: 3px 7px; font-size: 12px; outline: none; width: 130px;
+        }
+
+        /* Confidence bar */
+        .conf-bar  { display:flex; align-items:center; gap:5px; }
+        .conf-track{ width:42px; height:4px; background:#e2e8f0; border-radius:2px; overflow:hidden; flex-shrink:0; }
+        .conf-fill { height:100%; border-radius:2px; }
+        .cf-h { background:var(--ok); }
+        .cf-m { background:var(--warn); }
+        .cf-l { background:var(--fail); }
+        .conf-num { font-size:11.5px; font-weight:600; font-variant-numeric:tabular-nums; min-width:28px; }
+        .cn-h { color:#15803d; }
+        .cn-m { color:#92400e; }
+        .cn-l { color:#b91c1c; }
+
+        /* Angle bar (centred, -90 to +90) */
+        .ang-bar   { display:flex; align-items:center; gap:5px; }
+        .ang-track { width:50px; height:4px; background:#e2e8f0; border-radius:2px; position:relative; flex-shrink:0; }
+        .ang-mid   { position:absolute; left:50%; top:0; width:1px; height:100%; background:#94a3b8; }
+        .ang-fill  { position:absolute; top:0; height:100%; border-radius:2px; }
+
+        /* Chips */
+        .chip { display:inline-flex; align-items:center; gap:2px; padding:2px 7px; border-radius:9px; font-size:11px; font-weight:600; white-space:nowrap; }
+        .ck-ok    { background:#dcfce7; color:#15803d; }
+        .ck-fail  { background:#fee2e2; color:#dc2626; }
+        .ck-na    { background:#f1f5f9; color:#64748b; }
+        .ck-label { background:#ede9fe; color:#6d28d9; }
+        .ck-rel   { background:#ccfbf1; color:#0f766e; font-size:10.5px; }
+        .ck-run   { background:var(--bg); border:1px solid var(--border); border-radius:5px; padding:1px 7px; font-size:11.5px; font-weight:700; }
+
+        .mono { font-family:'SFMono-Regular','Consolas',monospace; }
+        .dim  { color:var(--text-muted); }
+
+        /* Relations cell */
+        .rel-cell { display:flex; flex-wrap:wrap; gap:2px; max-width:210px; }
+
+        /* Footer */
+        .footer {
+            border-top: 1px solid var(--border);
+            padding: 10px 24px;
+            font-size: 11px; color: var(--text-muted);
+            background: var(--surface);
+            display: flex; justify-content: space-between; align-items: center;
+        }
+    </style>
+</head>
+<body>
+
+<!-- ══════════════════════ SIDEBAR ══════════════════════ -->
+<nav id="sidebar">
+    <div class="sb-brand">
+        <div class="sb-brand-title">Vision Pipeline<br>Research Dashboard</div>
+        <div class="sb-brand-sub">ROS 2 · Object Explorer</div>
+    </div>
+
+    <div class="sb-group">Navigation</div>
+    <div class="sb-link" onclick="window.location.href='index.html'">
+        <div class="sb-dot" style="background:#64748b"></div>
+        ← Main Dashboard
+    </div>
+    <div class="sb-link active">
+        <div class="sb-dot" style="background:var(--color-obj)"></div>
+        Object Explorer
+    </div>
+
+    <div class="sb-group">Filters</div>
+    <div class="sb-link" onclick="setGroupBy('none')">
+        <div class="sb-dot" style="background:#64748b"></div>
+        No Grouping
+    </div>
+    <div class="sb-link" onclick="setGroupBy('label')">
+        <div class="sb-dot" style="background:var(--color-clip)"></div>
+        Group by CLIP Label
+    </div>
+    <div class="sb-link" onclick="setGroupBy('name')">
+        <div class="sb-dot" style="background:var(--color-obj)"></div>
+        Group by Assigned Name
+    </div>
+    <div class="sb-link" onclick="setGroupBy('stable')">
+        <div class="sb-dot" style="background:var(--ok)"></div>
+        Group by Stability
+    </div>
+    <div class="sb-link" onclick="setGroupBy('run')">
+        <div class="sb-dot" style="background:var(--color-sam)"></div>
+        Group by Run #
+    </div>
+
+    <div class="sb-group">Columns</div>
+    <div class="sb-link" onclick="sortByCol('sam_confidence')">
+        <div class="sb-dot" style="background:var(--color-sam)"></div>
+        Sort by SAM Conf
+    </div>
+    <div class="sb-link" onclick="sortByCol('obb_angle_deg')">
+        <div class="sb-dot" style="background:var(--color-obb)"></div>
+        Sort by OBB Angle
+    </div>
+    <div class="sb-link" onclick="sortByCol('distance_cm')">
+        <div class="sb-dot" style="background:var(--color-scene)"></div>
+        Sort by Depth
+    </div>
+    <div class="sb-link" onclick="sortByCol('grasp_quality')">
+        <div class="sb-dot" style="background:var(--color-grasp)"></div>
+        Sort by Grasp Quality
+    </div>
+</nav>
+
+<!-- ══════════════════════ MAIN ══════════════════════════ -->
+<div id="main">
+
+    <!-- Top bar -->
+    <div id="topbar">
+        <div>
+            <div class="tb-title">Object Explorer</div>
+            <div class="tb-sub">Sort · Group · Assign Names · Export  ·  data pulled from <code>vision_runs_history.json</code></div>
+        </div>
+        <div class="tb-right">
+            <span class="ctrl-label">Run</span>
+            <select id="runSelector" style="min-width:190px" onchange="buildAndRender()">
+                <option value="latest">Latest Run</option>
+            </select>
+
+            <div class="ctrl-sep"></div>
+            <span class="ctrl-label">Group</span>
+            <select id="groupBySelect" onchange="applyAndRender()">
+                <option value="none">None</option>
+                <option value="label">CLIP Label</option>
+                <option value="name">Assigned Name</option>
+                <option value="stable">Stability (AP≥0.5)</option>
+                <option value="grasp">Has Grasp</option>
+                <option value="run">Run #</option>
+            </select>
+
+            <div class="ctrl-sep"></div>
+            <input id="searchInput" type="text" placeholder="🔍  Search label, name, ID…"
+                   style="width:195px" oninput="applyAndRender()">
+
+            <div class="ctrl-sep"></div>
+            <button class="btn btn-green" onclick="exportCSV()">↓ CSV</button>
+            <button class="btn btn-primary" onclick="init()">↻ Refresh</button>
+        </div>
+    </div>
+
+    <div class="page-body">
+
+        <!-- Summary strip -->
+        <div class="summary-strip">
+            <div class="summary-pill">
+                <div class="pill-dot" style="background:var(--color-obj)"></div>
+                <span class="pill-val" id="pv-objects">0</span>
+                <span class="pill-lbl">Objects</span>
+            </div>
+            <div class="summary-pill">
+                <div class="pill-dot" style="background:var(--color-sam)"></div>
+                <span class="pill-val" id="pv-samconf">—</span>
+                <span class="pill-lbl">Avg SAM Conf</span>
+            </div>
+            <div class="summary-pill">
+                <div class="pill-dot" style="background:var(--color-clip)"></div>
+                <span class="pill-val" id="pv-labels">0</span>
+                <span class="pill-lbl">Unique Labels</span>
+            </div>
+            <div class="summary-pill">
+                <div class="pill-dot" style="background:var(--color-grasp)"></div>
+                <span class="pill-val" id="pv-graspable">0</span>
+                <span class="pill-lbl">Graspable</span>
+            </div>
+            <div class="summary-pill">
+                <div class="pill-dot" style="background:var(--color-obb)"></div>
+                <span class="pill-val" id="pv-obbavg">—</span>
+                <span class="pill-lbl">Avg OBB Angle</span>
+            </div>
+            <div class="summary-pill">
+                <div class="pill-dot" style="background:#22c55e"></div>
+                <span class="pill-val" id="pv-stable">0</span>
+                <span class="pill-lbl">Stable (AP≥0.5)</span>
+            </div>
+            <div class="summary-pill">
+                <div class="pill-dot" style="background:var(--color-scene)"></div>
+                <span class="pill-val" id="pv-rels">0</span>
+                <span class="pill-lbl">Relations</span>
+            </div>
+            <div class="summary-pill">
+                <div class="pill-dot" style="background:var(--color-obj)"></div>
+                <span class="pill-val" id="pv-named">0</span>
+                <span class="pill-lbl">Named</span>
+            </div>
+        </div>
+
+        <!-- Main table -->
+        <div class="section-card">
+            <div class="table-wrap">
+                <table id="tbl">
+                    <thead>
+                        <!-- ── Column Group Row ── -->
+                        <tr class="cg-row">
+                            <th class="sc1 cg-obj" colspan="3">Object</th>
+                            <th class="cg-sam"   colspan="6">SAM — Segment Anything Model</th>
+                            <th class="cg-clip"  colspan="3">CLIP Classification</th>
+                            <th class="cg-grasp" colspan="3">GraspNet</th>
+                            <th class="cg-obb"   colspan="4">OBB — Oriented BBox</th>
+                            <th class="cg-scene" colspan="2">Scene Understanding</th>
+                        </tr>
+                        <!-- ── Column Header Row ── -->
+                        <tr class="ch-row">
+                            <!-- Object -->
+                            <th class="sc1" data-col="assigned_name" onclick="toggleSort('assigned_name')">
+                                Assigned Name <span class="sort-icon">↕</span>
+                            </th>
+                            <th class="sc2" data-col="object_id" onclick="toggleSort('object_id')">
+                                Obj ID <span class="sort-icon">↕</span>
+                            </th>
+                            <th class="sc3" data-col="run_no" onclick="toggleSort('run_no')">
+                                Run # <span class="sort-icon">↕</span>
+                            </th>
+                            <!-- SAM -->
+                            <th>BBox (x1,y1 → x2,y2)</th>
+                            <th data-col="center_u" onclick="toggleSort('center_u')">
+                                Middle Point <span class="sort-icon">↕</span>
+                            </th>
+                            <th data-col="distance_cm" onclick="toggleSort('distance_cm')">
+                                z / Depth (cm) <span class="sort-icon">↕</span>
+                            </th>
+                            <th data-col="sam_confidence" onclick="toggleSort('sam_confidence')">
+                                Confidence <span class="sort-icon">↕</span>
+                            </th>
+                            <th data-col="iou_score" onclick="toggleSort('iou_score')">
+                                IoU Score <span class="sort-icon">↕</span>
+                            </th>
+                            <th data-col="is_stable" onclick="toggleSort('is_stable')">
+                                AP (IoU ≥ 0.5) <span class="sort-icon">↕</span>
+                            </th>
+                            <!-- CLIP -->
+                            <th data-col="label" onclick="toggleSort('label')">
+                                Label <span class="sort-icon">↕</span>
+                            </th>
+                            <th data-col="clip_confidence" onclick="toggleSort('clip_confidence')">
+                                Confidence <span class="sort-icon">↕</span>
+                            </th>
+                            <th>Top-1 Acc</th>
+                            <!-- GraspNet -->
+                            <th data-col="has_grasp" onclick="toggleSort('has_grasp')">
+                                Has Grasp <span class="sort-icon">↕</span>
+                            </th>
+                            <th data-col="grasp_quality" onclick="toggleSort('grasp_quality')">
+                                Quality (Q) <span class="sort-icon">↕</span>
+                            </th>
+                            <th data-col="grasp_width" onclick="toggleSort('grasp_width')">
+                                Width (m) <span class="sort-icon">↕</span>
+                            </th>
+                            <!-- OBB -->
+                            <th data-col="obb_angle_deg" onclick="toggleSort('obb_angle_deg')">
+                                Angle from X (°) <span class="sort-icon">↕</span>
+                            </th>
+                            <th data-col="obb_theta_rad" onclick="toggleSort('obb_theta_rad')">
+                                θ (rad) <span class="sort-icon">↕</span>
+                            </th>
+                            <th>W × H (px)</th>
+                            <th>OBB Center</th>
+                            <!-- Scene -->
+                            <th data-col="rel_count" onclick="toggleSort('rel_count')">
+                                Relations <span class="sort-icon">↕</span>
+                            </th>
+                            <th>Relation Detail</th>
+                        </tr>
+                    </thead>
+                    <tbody id="tbl-body">
+                        <tr class="no-data"><td colspan="21">Loading…</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+    </div><!-- /page-body -->
+
+    <div class="footer">
+        <span>Object Explorer · Vision Pipeline Research Dashboard · ROS 2</span>
+        <span id="footer-status">—</span>
+    </div>
+</div>
+
+<script>
+// ═══════════════════════════════════════════════════════════════
+//  State
+// ═══════════════════════════════════════════════════════════════
+let allRuns     = [];
+let currentRows = [];   // rows for selected run(s)
+let viewRows    = [];   // after filter + sort
+
+let sortCol = null;
+let sortDir = 'asc';
+
+const NAMES_KEY = 'vision_assigned_names';
+let assignedNames = {};
+try { assignedNames = JSON.parse(localStorage.getItem(NAMES_KEY) || '{}'); } catch(_) {}
+
+function saveName(oid, name) {
+    if (name) assignedNames[oid] = name;
+    else       delete assignedNames[oid];
+    localStorage.setItem(NAMES_KEY, JSON.stringify(assignedNames));
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  Fetch
+// ═══════════════════════════════════════════════════════════════
+async function init() {
+    try {
+        const res = await fetch('/api/run-history');
+        allRuns   = await res.json();
+        populateRunSelector();
+        buildAndRender();
+        document.getElementById('footer-status').textContent =
+            `Refreshed ${new Date().toLocaleTimeString()}  ·  ${allRuns.length} run(s) in history`;
+    } catch(e) {
+        showNoData('Cannot connect to /api/run-history — start the benchmark_dashboard node first.');
+        document.getElementById('footer-status').textContent = 'Offline';
+    }
+}
+
+function populateRunSelector() {
+    const sel  = document.getElementById('runSelector');
+    const prev = sel.value;
+    sel.innerHTML = '<option value="latest">Latest Run</option><option value="all">All Runs</option>';
+    allRuns.slice().reverse().forEach(r => {
+        const m  = r.meta || {};
+        const ts = m.timestamp ? new Date(m.timestamp).toLocaleString() : '?';
+        sel.innerHTML += `<option value="${m.run_no}">Run #${m.run_no} — ${ts}</option>`;
+    });
+    try { sel.value = prev; } catch(_) {}
+}
+
+function getSelectedRuns() {
+    const v = document.getElementById('runSelector').value;
+    if (v === 'latest') return allRuns.slice(-1);
+    if (v === 'all')    return allRuns;
+    return allRuns.filter(r => String(r.meta?.run_no) === v);
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  Build flat row objects from run history
+// ═══════════════════════════════════════════════════════════════
+function buildRows(runs) {
+    const rows = [];
+    for (const run of runs) {
+        const meta  = run.meta  || {};
+        const scene = run.scene || {};
+
+        // relation lookup: object_id → relation list
+        const relMap = {};
+        for (const rel of (run.relations || [])) {
+            if (!relMap[rel.subject]) relMap[rel.subject] = [];
+            relMap[rel.subject].push(rel);
+        }
+
+        for (const obj of (run.objects || [])) {
+            const oid  = obj.object_id || '';
+            const bx1  = obj.bbox_x1 != null ? +obj.bbox_x1 : null;
+            const by1  = obj.bbox_y1 != null ? +obj.bbox_y1 : null;
+            const bx2  = obj.bbox_x2 != null ? +obj.bbox_x2 : null;
+            const by2  = obj.bbox_y2 != null ? +obj.bbox_y2 : null;
+            const cu   = bx1 != null && bx2 != null ? Math.round((bx1+bx2)/2) : null;
+            const cv   = by1 != null && by2 != null ? Math.round((by1+by2)/2) : null;
+            const gq   = obj.grasp?.quality_score != null ? +obj.grasp.quality_score : null;
+            const gw   = obj.grasp?.width_m       != null ? +obj.grasp.width_m       : null;
+            const rels = relMap[oid] || [];
+
+            const toNum = v => (v !== '' && v != null) ? +v : null;
+
+            rows.push({
+                /* ─ Object ─ */
+                assigned_name:   assignedNames[oid] || '',
+                object_id:       oid,
+                run_no:          meta.run_no ?? '?',
+                timestamp:       meta.timestamp || '',
+                /* ─ SAM ─ */
+                bbox_x1:         bx1,  bbox_y1: by1,
+                bbox_x2:         bx2,  bbox_y2: by2,
+                center_u:        cu,   center_v: cv,
+                distance_cm:     obj.distance_cm    != null ? +obj.distance_cm    : null,
+                sam_confidence:  obj.sam_confidence != null ? +obj.sam_confidence : null,
+                iou_score:       obj.iou_score      != null ? +obj.iou_score      : null,
+                is_stable:       obj.is_stable ?? null,
+                /* ─ CLIP ─ */
+                label:           obj.label || '',
+                clip_confidence: obj.clip_confidence != null ? +obj.clip_confidence : null,
+                /* ─ GraspNet ─ */
+                has_grasp:       obj.has_grasp ?? false,
+                grasp_quality:   gq,
+                grasp_width:     gw,
+                /* ─ OBB ─ */
+                obb_angle_deg:   toNum(obj.obb_angle_deg),
+                obb_theta_rad:   toNum(obj.obb_theta_rad),
+                obb_width_px:    toNum(obj.obb_width_px),
+                obb_height_px:   toNum(obj.obb_height_px),
+                obb_center_u:    toNum(obj.obb_center_u),
+                obb_center_v:    toNum(obj.obb_center_v),
+                /* ─ Scene ─ */
+                relations:       rels,
+                rel_count:       rels.length,
+                scene_desc:      scene.scene_description || '',
+            });
+        }
+    }
+    return rows;
+}
+
+function buildAndRender() {
+    currentRows = buildRows(getSelectedRuns());
+    applyAndRender();
+}
+
+function applyAndRender() {
+    const q = (document.getElementById('searchInput').value || '').toLowerCase().trim();
+
+    viewRows = q
+        ? currentRows.filter(r =>
+            (r.assigned_name || '').toLowerCase().includes(q) ||
+            (r.label         || '').toLowerCase().includes(q) ||
+            (r.object_id     || '').toLowerCase().includes(q)
+          )
+        : [...currentRows];
+
+    // Sort
+    if (sortCol) {
+        viewRows.sort((a, b) => {
+            let av = a[sortCol], bv = b[sortCol];
+            if (av == null && bv == null) return 0;
+            if (av == null) return 1;
+            if (bv == null) return -1;
+            if (typeof av === 'boolean') av = av ? 1 : 0;
+            if (typeof bv === 'boolean') bv = bv ? 1 : 0;
+            return av < bv ? (sortDir==='asc'?-1:1) : av > bv ? (sortDir==='asc'?1:-1) : 0;
+        });
+    }
+
+    renderTable();
+    updateSummary();
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  Render
+// ═══════════════════════════════════════════════════════════════
+function renderTable() {
+    const tbody = document.getElementById('tbl-body');
+    if (!viewRows.length) {
+        tbody.innerHTML = '<tr class="no-data"><td colspan="21">No objects match — try changing the run or clearing the search.</td></tr>';
+        return;
+    }
+
+    const groupBy = document.getElementById('groupBySelect').value;
+
+    if (groupBy === 'none') {
+        tbody.innerHTML = viewRows.map(renderRow).join('');
+        return;
+    }
+
+    const keyFn = {
+        label:  r => r.label           || '(no label)',
+        name:   r => r.assigned_name   || '(unassigned)',
+        stable: r => r.is_stable ? '✓ Stable  (AP ≥ 0.5)' : '✗ Unstable',
+        grasp:  r => r.has_grasp ? '✓ Graspable' : '✗ Not graspable',
+        run:    r => `Run #${r.run_no}`,
+    }[groupBy] || (() => 'All');
+
+    const groups = new Map();
+    for (const r of viewRows) {
+        const k = keyFn(r);
+        if (!groups.has(k)) groups.set(k, []);
+        groups.get(k).push(r);
+    }
+
+    let html = '';
+    for (const [key, gRows] of [...groups.entries()].sort(([a],[b]) => a < b ? -1 : a > b ? 1 : 0)) {
+        const graspN  = gRows.filter(r => r.has_grasp).length;
+        const confN   = gRows.filter(r => r.sam_confidence != null);
+        const avgConf = confN.length
+            ? (confN.reduce((s,r) => s + r.sam_confidence, 0) / confN.length).toFixed(3)
+            : null;
+        html += `<tr class="group-row">
+            <td colspan="21">
+                <span class="group-label">${esc(key)}</span>
+                <span class="chip ck-na">${gRows.length} obj</span>
+                ${avgConf != null ? `<span class="chip ck-na">Avg SAM ${avgConf}</span>` : ''}
+                ${graspN ? `<span class="chip ck-ok">${graspN} graspable</span>` : ''}
+            </td>
+        </tr>`;
+        html += gRows.map(renderRow).join('');
+    }
+    tbody.innerHTML = html;
+}
+
+function renderRow(r) {
+    const oid  = r.object_id;
+    const sid  = escId(oid);
+    const name = r.assigned_name || '';
+
+    // BBox string
+    const bboxStr = r.bbox_x1 != null
+        ? `(${Math.round(r.bbox_x1)},${Math.round(r.bbox_y1)})→(${Math.round(r.bbox_x2)},${Math.round(r.bbox_y2)})`
+        : null;
+
+    // Center (middle point)
+    const centerStr = r.center_u != null ? `(${r.center_u}, ${r.center_v})` : null;
+
+    return `<tr>
+        <!-- Object: Assigned Name -->
+        <td class="sc1">
+            <div class="name-cell" id="nc-${sid}">
+                <span class="name-val ${name?'':'empty'}" title="${esc(name||'Click ✏ to assign')}">${esc(name||'Assign name…')}</span>
+                <button class="edit-btn" onclick="startEdit(${JSON.stringify(oid)})" title="Edit name">✏</button>
+            </div>
+        </td>
+        <!-- Obj ID -->
+        <td class="sc2 mono" style="font-size:11px;color:var(--text-secondary)">${esc(oid)}</td>
+        <!-- Run # -->
+        <td class="sc3"><span class="chip ck-run">#${r.run_no}</span></td>
+
+        <!-- SAM: BBox -->
+        <td class="mono" style="font-size:11px">${bboxStr ?? '<span class="dim">—</span>'}</td>
+        <!-- SAM: Middle Point (center) -->
+        <td class="mono">${centerStr ?? '<span class="dim">—</span>'}</td>
+        <!-- SAM: z / Depth -->
+        <td class="mono">${r.distance_cm != null ? r.distance_cm.toFixed(1) : '<span class="dim">—</span>'}</td>
+        <!-- SAM: Confidence -->
+        <td>${confBar(r.sam_confidence)}</td>
+        <!-- SAM: IoU -->
+        <td>${confBar(r.iou_score)}</td>
+        <!-- SAM: AP (IoU>=0.5) -->
+        <td>${r.is_stable === null || r.is_stable === undefined
+                ? '<span class="chip ck-na">—</span>'
+                : r.is_stable
+                    ? '<span class="chip ck-ok">✓ Pass</span>'
+                    : '<span class="chip ck-fail">✗ Fail</span>'}</td>
+
+        <!-- CLIP: Label -->
+        <td>${r.label ? `<span class="chip ck-label">${esc(r.label)}</span>` : '<span class="dim">—</span>'}</td>
+        <!-- CLIP: Confidence -->
+        <td>${confBar(r.clip_confidence)}</td>
+        <!-- CLIP: Top-1 Acc -->
+        <td><span class="chip ck-na" title="Not stored in run history — requires benchmark_dashboard">N/A</span></td>
+
+        <!-- GraspNet: Has Grasp -->
+        <td>${r.has_grasp
+            ? '<span class="chip ck-ok">✓ Yes</span>'
+            : '<span class="chip ck-fail">✗ No</span>'}</td>
+        <!-- GraspNet: Quality -->
+        <td>${confBar(r.grasp_quality)}</td>
+        <!-- GraspNet: Width -->
+        <td class="mono">${r.grasp_width != null ? r.grasp_width.toFixed(3) + ' m' : '<span class="dim">—</span>'}</td>
+
+        <!-- OBB: Angle from X-axis -->
+        <td>${angleBar(r.obb_angle_deg)}</td>
+        <!-- OBB: θ rad -->
+        <td class="mono">${r.obb_theta_rad != null ? r.obb_theta_rad.toFixed(4) : '<span class="dim">—</span>'}</td>
+        <!-- OBB: W × H -->
+        <td class="mono">${r.obb_width_px != null
+            ? `${Math.round(r.obb_width_px)} × ${Math.round(r.obb_height_px)}`
+            : '<span class="dim">—</span>'}</td>
+        <!-- OBB: Center -->
+        <td class="mono">${r.obb_center_u != null
+            ? `(${Math.round(r.obb_center_u)}, ${Math.round(r.obb_center_v)})`
+            : '<span class="dim">—</span>'}</td>
+
+        <!-- Scene: Relation count -->
+        <td>${r.rel_count > 0
+            ? `<span class="chip ck-rel">${r.rel_count}</span>`
+            : '<span class="dim">—</span>'}</td>
+        <!-- Scene: Relation detail -->
+        <td>
+            <div class="rel-cell">
+                ${r.relations.slice(0, 3).map(rx =>
+                    `<span class="chip ck-rel" title="${esc(rx.description||'')}">${esc(rx.relation||'')} ${esc(rx.target_object||'')} <span style="opacity:.6">${rx.confidence!=null?(+rx.confidence*100).toFixed(0)+'%':''}</span></span>`
+                ).join('')}
+                ${r.relations.length > 3
+                    ? `<span class="chip ck-na" title="Click to expand (future)">+${r.relations.length-3} more</span>`
+                    : ''}
+            </div>
+        </td>
+    </tr>`;
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  Visual helpers
+// ═══════════════════════════════════════════════════════════════
+function confBar(v) {
+    if (v == null) return '<span class="dim">—</span>';
+    const n   = parseFloat(v);
+    if (isNaN(n)) return '<span class="dim">—</span>';
+    const cls = n >= 0.7 ? 'h' : n >= 0.4 ? 'm' : 'l';
+    const pct = Math.min(100, Math.round(n * 100));
+    return `<div class="conf-bar">
+        <div class="conf-track"><div class="conf-fill cf-${cls}" style="width:${pct}%"></div></div>
+        <span class="conf-num cn-${cls}">${n.toFixed(2)}</span>
+    </div>`;
+}
+
+function angleBar(deg) {
+    if (deg == null) return '<span class="dim">—</span>';
+    const n = parseFloat(deg);
+    if (isNaN(n)) return '<span class="dim">—</span>';
+    // range -90 to +90, bar centred at 0
+    const clr   = Math.abs(n) < 20 ? 'var(--ok)' : Math.abs(n) < 60 ? 'var(--warn)' : 'var(--fail)';
+    const half  = 50; // 50% = center
+    const pct   = Math.abs(n) / 90 * half; // 0→50
+    const style = n >= 0
+        ? `left:${half}%;width:${pct}%;background:${clr}`
+        : `right:${half}%;width:${pct}%;left:${half - pct}%;background:${clr}`;
+    return `<div class="ang-bar">
+        <div class="ang-track">
+            <div class="ang-mid"></div>
+            <div class="ang-fill" style="${style}"></div>
+        </div>
+        <span class="conf-num" style="color:${clr};min-width:42px">${n.toFixed(1)}°</span>
+    </div>`;
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  Sort
+// ═══════════════════════════════════════════════════════════════
+function toggleSort(col) {
+    if (sortCol === col) sortDir = sortDir === 'asc' ? 'desc' : 'asc';
+    else { sortCol = col; sortDir = 'asc'; }
+    refreshSortIcons();
+    applyAndRender();
+}
+function sortByCol(col) {
+    sortCol = col; sortDir = 'asc';
+    refreshSortIcons();
+    applyAndRender();
+}
+function refreshSortIcons() {
+    document.querySelectorAll('.ch-row th').forEach(th => {
+        th.classList.remove('sort-asc','sort-desc');
+        const ic = th.querySelector('.sort-icon');
+        if (ic) ic.textContent = '↕';
+    });
+    const active = document.querySelector(`.ch-row th[data-col="${sortCol}"]`);
+    if (active) {
+        active.classList.add(sortDir === 'asc' ? 'sort-asc' : 'sort-desc');
+        const ic = active.querySelector('.sort-icon');
+        if (ic) ic.textContent = sortDir === 'asc' ? '↑' : '↓';
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  Inline name editing
+// ═══════════════════════════════════════════════════════════════
+function startEdit(oid) {
+    const cellDiv = document.getElementById('nc-' + escId(oid));
+    if (!cellDiv) return;
+    const cur = assignedNames[oid] || '';
+    cellDiv.innerHTML = `<input class="name-input" id="ni-${escId(oid)}"
+        type="text" value="${esc(cur)}" placeholder="Object name…"
+        maxlength="50" autocomplete="off">`;
+    const inp = document.getElementById('ni-' + escId(oid));
+    if (!inp) return;
+    inp.focus(); inp.select();
+    inp.addEventListener('blur',    () => commitEdit(oid, inp.value));
+    inp.addEventListener('keydown', e => {
+        if (e.key === 'Enter')  inp.blur();
+        if (e.key === 'Escape') { inp.value = cur; inp.blur(); }
+    });
+}
+
+function commitEdit(oid, rawName) {
+    const name = (rawName || '').trim();
+    saveName(oid, name);
+    // Update in-memory rows
+    [currentRows, viewRows].forEach(arr => {
+        arr.forEach(r => { if (r.object_id === oid) r.assigned_name = name; });
+    });
+    // Re-render that cell only
+    const cellDiv = document.getElementById('nc-' + escId(oid));
+    if (cellDiv) {
+        cellDiv.innerHTML = `
+            <span class="name-val ${name?'':'empty'}" title="${esc(name||'Click ✏ to assign')}">${esc(name||'Assign name…')}</span>
+            <button class="edit-btn" onclick="startEdit(${JSON.stringify(oid)})" title="Edit name">✏</button>`;
+    }
+    updateSummary();
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  Summary pills
+// ═══════════════════════════════════════════════════════════════
+function updateSummary() {
+    const n = viewRows.length;
+    document.getElementById('pv-objects').textContent = n;
+
+    const cRows = viewRows.filter(r => r.sam_confidence != null);
+    document.getElementById('pv-samconf').textContent =
+        cRows.length ? (cRows.reduce((s,r) => s+r.sam_confidence, 0) / cRows.length).toFixed(3) : '—';
+
+    document.getElementById('pv-labels').textContent =
+        new Set(viewRows.filter(r=>r.label).map(r=>r.label)).size;
+
+    document.getElementById('pv-graspable').textContent =
+        viewRows.filter(r => r.has_grasp).length;
+
+    const oRows = viewRows.filter(r => r.obb_angle_deg != null);
+    document.getElementById('pv-obbavg').textContent =
+        oRows.length ? (oRows.reduce((s,r)=>s+r.obb_angle_deg,0)/oRows.length).toFixed(1)+'°' : '—';
+
+    document.getElementById('pv-stable').textContent =
+        viewRows.filter(r => r.is_stable === true).length;
+
+    document.getElementById('pv-rels').textContent =
+        viewRows.reduce((s,r) => s + r.rel_count, 0);
+
+    document.getElementById('pv-named').textContent =
+        viewRows.filter(r => r.assigned_name).length;
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  Group-by helper (called from sidebar links)
+// ═══════════════════════════════════════════════════════════════
+function setGroupBy(val) {
+    document.getElementById('groupBySelect').value = val;
+    applyAndRender();
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  Export CSV
+// ═══════════════════════════════════════════════════════════════
+function exportCSV() {
+    const hdr = [
+        'Assigned Name','Object ID','Run #','Timestamp',
+        'BBox X1','BBox Y1','BBox X2','BBox Y2',
+        'Center U (px)','Center V (px)',
+        'Depth / z (cm)',
+        'SAM Confidence','IoU Score','AP (IoU>=0.5)',
+        'CLIP Label','CLIP Confidence',
+        'Has Grasp','Grasp Quality','Grasp Width (m)',
+        'OBB Angle from X (deg)','OBB Theta (rad)',
+        'OBB Width (px)','OBB Height (px)',
+        'OBB Center U','OBB Center V',
+        'Relations Count','Relation List'
+    ];
+    const data = viewRows.map(r => [
+        r.assigned_name,       r.object_id,         r.run_no,            r.timestamp,
+        r.bbox_x1  ?? '',      r.bbox_y1  ?? '',     r.bbox_x2  ?? '',    r.bbox_y2  ?? '',
+        r.center_u ?? '',      r.center_v ?? '',
+        r.distance_cm ?? '',
+        r.sam_confidence ?? '', r.iou_score ?? '',
+        r.is_stable == null ? '' : r.is_stable,
+        r.label,               r.clip_confidence ?? '',
+        r.has_grasp,           r.grasp_quality ?? '', r.grasp_width ?? '',
+        r.obb_angle_deg ?? '',  r.obb_theta_rad ?? '',
+        r.obb_width_px  ?? '',  r.obb_height_px ?? '',
+        r.obb_center_u  ?? '',  r.obb_center_v  ?? '',
+        r.rel_count,
+        r.relations.map(x => `${x.subject} ${x.relation} ${x.target_object}`).join(' | ')
+    ].map(v => `"${String(v ?? '').replace(/"/g,'""')}"`));
+
+    const csv  = [hdr.map(h=>`"${h}"`).join(','), ...data.map(d=>d.join(','))].join('\n');
+    const blob = new Blob(['\uFEFF'+csv], {type:'text/csv;charset=utf-8;'});
+    const url  = URL.createObjectURL(blob);
+    const a    = Object.assign(document.createElement('a'), {
+        href:     url,
+        download: `vision_objects_${new Date().toISOString().slice(0,19).replace(/[T:]/g,'_')}.csv`
+    });
+    a.click();
+    URL.revokeObjectURL(url);
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  Utilities
+// ═══════════════════════════════════════════════════════════════
+function esc(s) {
+    return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+function escId(s) {
+    return String(s ?? '').replace(/[^a-zA-Z0-9_-]/g, '_');
+}
+function showNoData(msg) {
+    document.getElementById('tbl-body').innerHTML =
+        `<tr class="no-data"><td colspan="21">${esc(msg)}</td></tr>`;
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  Bootstrap
+// ═══════════════════════════════════════════════════════════════
+init();
+setInterval(init, 5000);
+</script>
+</body>
+</html>

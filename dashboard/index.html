@@ -500,6 +500,17 @@
         Pixel → Real
         <span class="sb-count" id="nav-pixel">0</span>
     </div>
+    <div class="sb-link" onclick="jumpTo('sec-obb')">
+        <div class="sb-dot" style="background:#f97316"></div>
+        OBB Angles
+        <span class="sb-count" id="nav-obb">0</span>
+    </div>
+
+    <div class="sb-group">Analysis</div>
+    <div class="sb-link" onclick="window.location.href='objects.html'">
+        <div class="sb-dot" style="background:#6366f1"></div>
+        Object Explorer
+    </div>
 </nav>
 
 <!-- ══════════════════════════════════ MAIN ═════════════════════════════════ -->
@@ -550,6 +561,11 @@
                 <div class="kpi-value" id="pixelCount">0</div>
                 <div class="kpi-label">Pixel→Real</div>
             </div>
+            <div class="kpi-card" style="--accent:#f97316">
+                <div class="kpi-value" id="obbCount">0</div>
+                <div class="kpi-label">OBB Objects</div>
+                <div class="kpi-sub">Latest run</div>
+            </div>
             <div class="kpi-card" style="--accent:#64748b">
                 <div class="kpi-value" id="totalCalls">0</div>
                 <div class="kpi-label">Total Svc Calls</div>
@@ -583,7 +599,23 @@
                 </div>
                 <div class="metric-tile">
                     <div class="metric-val" id="rhLastLatency">—</div>
-                    <div class="metric-lbl">Last Latency</div>
+                    <div class="metric-lbl">Total Latency</div>
+                </div>
+                <div class="metric-tile">
+                    <div class="metric-val" id="rhSamLatency">—</div>
+                    <div class="metric-lbl">SAM Latency</div>
+                </div>
+                <div class="metric-tile">
+                    <div class="metric-val" id="rhClipLatency">—</div>
+                    <div class="metric-lbl">CLIP Latency</div>
+                </div>
+                <div class="metric-tile">
+                    <div class="metric-val" id="rhSceneLatency">—</div>
+                    <div class="metric-lbl">Scene Latency</div>
+                </div>
+                <div class="metric-tile">
+                    <div class="metric-val" id="rhObbLatency">—</div>
+                    <div class="metric-lbl">OBB Latency</div>
                 </div>
             </div>
             <div class="table-wrap">
@@ -591,19 +623,25 @@
                     <thead><tr>
                         <th>Run</th>
                         <th>Timestamp</th>
-                        <th>Latency (s)</th>
-                        <th>SAM Detections</th>
+                        <th>Total (s)</th>
+                        <th>SAM (s)</th>
+                        <th>CLIP (s)</th>
+                        <th>Scene (s)</th>
+                        <th>OBB (s)</th>
+                        <th>SAM Objects</th>
                         <th>SAM Avg Conf</th>
                         <th>CLIP Filtered</th>
                         <th>Scene Objects</th>
                         <th>Relations</th>
                         <th>Graspable</th>
+                        <th>OBB Objects</th>
                         <th>SAM</th>
                         <th>CLIP</th>
                         <th>Scene</th>
+                        <th>OBB</th>
                     </tr></thead>
                     <tbody id="runHistoryBody">
-                        <tr class="no-data-row"><td colspan="12">No run history yet — run <code>collect_and_export.py</code></td></tr>
+                        <tr class="no-data-row"><td colspan="18">No run history yet — run <code>collect_and_export.py</code></td></tr>
                     </tbody>
                 </table>
             </div>
@@ -633,9 +671,12 @@
                         <th>Stable</th>
                         <th>Has Grasp</th>
                         <th>Grasp Quality</th>
+                        <th>OBB Angle (°)</th>
+                        <th>OBB Width (px)</th>
+                        <th>OBB Height (px)</th>
                     </tr></thead>
                     <tbody id="latestObjectsBody">
-                        <tr class="no-data-row"><td colspan="10">No data yet</td></tr>
+                        <tr class="no-data-row"><td colspan="13">No data yet</td></tr>
                     </tbody>
                 </table>
             </div>
@@ -663,6 +704,59 @@
                     </tr></thead>
                     <tbody id="latestRelationsBody">
                         <tr class="no-data-row"><td colspan="6">No data yet</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- ── OBB Angle Benchmark ─────────────────────────────────── -->
+        <div id="sec-obb" class="section-card">
+            <div class="section-head">
+                <div class="section-accent" style="background:#f97316"></div>
+                <div>
+                    <div class="section-title">OBB — Oriented Bounding Box Angle Benchmark</div>
+                    <div class="section-subtitle">/obb/find_object_angle · angle parallel to width · 0° = vertical · range −90° to +90°</div>
+                </div>
+                <span class="section-badge" id="obbBadge" style="background:#f97316">0 Objects</span>
+            </div>
+            <div class="metric-strip">
+                <div class="metric-tile">
+                    <div class="metric-val" id="obbTotalObjects">—</div>
+                    <div class="metric-lbl">Objects (Latest)</div>
+                </div>
+                <div class="metric-tile">
+                    <div class="metric-val" id="obbAvgAngle">—</div>
+                    <div class="metric-lbl">Avg Angle (°)</div>
+                </div>
+                <div class="metric-tile">
+                    <div class="metric-val" id="obbMinAngle">—</div>
+                    <div class="metric-lbl">Min Angle (°)</div>
+                </div>
+                <div class="metric-tile">
+                    <div class="metric-val" id="obbMaxAngle">—</div>
+                    <div class="metric-lbl">Max Angle (°)</div>
+                </div>
+                <div class="metric-tile">
+                    <div class="metric-val" id="obbLatency">—</div>
+                    <div class="metric-lbl">OBB Latency (s)</div>
+                </div>
+            </div>
+            <div class="table-wrap">
+                <table>
+                    <thead><tr>
+                        <th>Object ID</th>
+                        <th>Label</th>
+                        <th>OBB Angle (°)</th>
+                        <th>OBB Theta (rad)</th>
+                        <th>OBB Width (px)</th>
+                        <th>OBB Height (px)</th>
+                        <th>Center (u, v)</th>
+                        <th>Bounding Box</th>
+                        <th>SAM Confidence</th>
+                        <th>Distance (cm)</th>
+                    </tr></thead>
+                    <tbody id="obbBody">
+                        <tr class="no-data-row"><td colspan="10">No OBB data — ensure <code>obb_angle_service_node</code> is running</td></tr>
                     </tbody>
                 </table>
             </div>
@@ -1138,29 +1232,45 @@
         document.getElementById('rhLastRelations').textContent= latest.scene?.total_relations ?? '—';
         document.getElementById('rhLastLatency').textContent  =
             latest.meta?.latency_s != null ? latest.meta.latency_s.toFixed(2) + ' s' : '—';
+        document.getElementById('rhSamLatency').textContent   =
+            latest.sam?.latency_s  != null ? latest.sam.latency_s.toFixed(2)  + ' s' : '—';
+        document.getElementById('rhClipLatency').textContent  =
+            latest.clip?.latency_s != null ? latest.clip.latency_s.toFixed(2) + ' s' : '—';
+        document.getElementById('rhSceneLatency').textContent =
+            latest.scene?.latency_s!= null ? latest.scene.latency_s.toFixed(2)+ ' s' : '—';
+        document.getElementById('rhObbLatency').textContent   =
+            latest.obb?.latency_s  != null ? latest.obb.latency_s.toFixed(2)  + ' s' : '—';
 
-        // Run history table
+        // Run history table — update to include latency per service and OBB
         tbody.innerHTML = runs.slice().reverse().map(run => {
-            const meta  = run.meta  || {};
-            const sam   = run.sam   || {};
-            const clip  = run.clip  || {};
-            const scene = run.scene || {};
-            const t = meta.timestamp ? new Date(meta.timestamp).toLocaleString() : '—';
-            return `<tr>
-                <td><span class="chip chip-run">#${meta.run_no ?? '?'}</span></td>
-                <td class="ts">${t}</td>
-                <td class="mono">${meta.latency_s != null ? meta.latency_s.toFixed(2) : '—'}</td>
-                <td class="mono">${sam.total_detections ?? '—'}</td>
-                <td>${sam.avg_confidence != null ? confBar(sam.avg_confidence) : '—'}</td>
-                <td class="mono">${clip.filtered_regions ?? '—'}</td>
-                <td class="mono">${scene.total_objects   ?? '—'}</td>
-                <td class="mono">${scene.total_relations ?? '—'}</td>
-                <td class="mono">${scene.graspable_objects ?? '—'}</td>
-                <td>${chipSvc(sam.success)}</td>
-                <td>${chipSvc(clip.success)}</td>
-                <td>${chipSvc(scene.success)}</td>
-            </tr>`;
-        }).join('');
+                const meta  = run.meta  || {};
+                const sam   = run.sam   || {};
+                const clip  = run.clip  || {};
+                const scene = run.scene || {};
+                const obb   = run.obb   || {};
+                const t = meta.timestamp ? new Date(meta.timestamp).toLocaleString() : '—';
+                const obbObjects = (run.objects || []).filter(o => o.obb_angle_deg !== '' && o.obb_angle_deg != null).length;
+                return `<tr>
+                    <td><span class="chip chip-run">#${meta.run_no ?? '?'}</span></td>
+                    <td class="ts">${t}</td>
+                    <td class="mono">${meta.latency_s  != null ? meta.latency_s.toFixed(2)  : '—'}</td>
+                    <td class="mono">${sam.latency_s   != null ? sam.latency_s.toFixed(2)   : '—'}</td>
+                    <td class="mono">${clip.latency_s  != null ? clip.latency_s.toFixed(2)  : '—'}</td>
+                    <td class="mono">${scene.latency_s != null ? scene.latency_s.toFixed(2) : '—'}</td>
+                    <td class="mono">${obb.latency_s   != null ? obb.latency_s.toFixed(2)   : '—'}</td>
+                    <td class="mono">${sam.total_detections ?? '—'}</td>
+                    <td>${sam.avg_confidence != null ? confBar(sam.avg_confidence) : '—'}</td>
+                    <td class="mono">${clip.filtered_regions ?? '—'}</td>
+                    <td class="mono">${scene.total_objects   ?? '—'}</td>
+                    <td class="mono">${scene.total_relations ?? '—'}</td>
+                    <td class="mono">${scene.graspable_objects ?? '—'}</td>
+                    <td class="mono">${obbObjects}</td>
+                    <td>${chipSvc(sam.success)}</td>
+                    <td>${chipSvc(clip.success)}</td>
+                    <td>${chipSvc(scene.success)}</td>
+                    <td>${chipSvc(obb.success)}</td>
+                </tr>`;
+            }).join('');
 
         // Latest objects
         const objects = latest.objects || [];
@@ -1177,6 +1287,9 @@
             <td>${chipOk(obj.is_stable)}</td>
             <td>${chipOk(obj.has_grasp)}</td>
             <td>${obj.grasp ? confBar(obj.grasp.quality_score) : '<span style="color:var(--text-muted)">—</span>'}</td>
+            <td class="mono" style="font-weight:600">${obj.obb_angle_deg != null && obj.obb_angle_deg !== '' ? obj.obb_angle_deg.toFixed(1) + '°' : '<span style="color:var(--text-muted)">—</span>'}</td>
+            <td class="mono">${obj.obb_width_px  != null && obj.obb_width_px  !== '' ? Math.round(obj.obb_width_px)  : '—'}</td>
+            <td class="mono">${obj.obb_height_px != null && obj.obb_height_px !== '' ? Math.round(obj.obb_height_px) : '—'}</td>
         </tr>`).join('') : noObj;
 
         // Latest relations
@@ -1191,6 +1304,60 @@
             <td class="mono">${rel.distance_2d != null ? rel.distance_2d.toFixed(1) : '—'}</td>
             <td style="font-size:12px;color:var(--text-secondary)">${rel.description ?? ''}</td>
         </tr>`).join('') : noRel;
+
+        // OBB section from latest run
+        updateOBBSection(latest);
+    }
+
+    function updateOBBSection(latestRun) {
+        const obbMeta = latestRun.obb || {};
+        const objects = (latestRun.objects || []).filter(o => o.obb_angle_deg != null && o.obb_angle_deg !== '');
+        const tbody   = document.getElementById('obbBody');
+
+        document.getElementById('obbBadge').textContent       = `${objects.length} Objects`;
+        document.getElementById('obbTotalObjects').textContent = objects.length;
+        document.getElementById('obbLatency').textContent      =
+            obbMeta.latency_s != null ? obbMeta.latency_s.toFixed(2) + ' s' : '—';
+        setNav('nav-obb', objects.length);
+        document.getElementById('obbCount').textContent = objects.length;
+
+        if (!objects.length) {
+            document.getElementById('obbAvgAngle').textContent = '—';
+            document.getElementById('obbMinAngle').textContent = '—';
+            document.getElementById('obbMaxAngle').textContent = '—';
+            tbody.innerHTML = '<tr class="no-data-row"><td colspan="10">No OBB data — ensure <code>obb_angle_service_node</code> is running</td></tr>';
+            return;
+        }
+
+        const angles = objects.map(o => o.obb_angle_deg);
+        const avg    = angles.reduce((s, v) => s + v, 0) / angles.length;
+        document.getElementById('obbAvgAngle').textContent = avg.toFixed(1) + '°';
+        document.getElementById('obbMinAngle').textContent = Math.min(...angles).toFixed(1) + '°';
+        document.getElementById('obbMaxAngle').textContent = Math.max(...angles).toFixed(1) + '°';
+
+        tbody.innerHTML = objects.map(obj => {
+            const angleDeg = obj.obb_angle_deg;
+            // Angle bar: map -90..+90 to 0..100%
+            const pct      = Math.round(((angleDeg + 90) / 180) * 100);
+            const barColor = Math.abs(angleDeg) < 20 ? 'var(--ok)' : Math.abs(angleDeg) < 60 ? 'var(--warn)' : 'var(--fail)';
+            return `<tr>
+                <td class="mono">${obj.object_id ?? '—'}</td>
+                <td><span class="chip chip-label">${obj.label ?? 'unknown'}</span></td>
+                <td>
+                    <div class="conf-bar">
+                        <div class="conf-track" style="width:80px"><div class="conf-fill" style="width:${pct}%;background:${barColor}"></div></div>
+                        <span class="conf-num" style="color:${barColor};min-width:52px">${angleDeg.toFixed(1)}°</span>
+                    </div>
+                </td>
+                <td class="mono">${obj.obb_theta_rad != null ? Number(obj.obb_theta_rad).toFixed(4) : '—'}</td>
+                <td class="mono">${obj.obb_width_px  != null ? Math.round(obj.obb_width_px)  : '—'}</td>
+                <td class="mono">${obj.obb_height_px != null ? Math.round(obj.obb_height_px) : '—'}</td>
+                <td class="mono">${obj.obb_center_u != null ? Math.round(obj.obb_center_u) : '—'}, ${obj.obb_center_v != null ? Math.round(obj.obb_center_v) : '—'}</td>
+                <td class="mono" style="font-size:11px">(${obj.bbox_x1??0},${obj.bbox_y1??0})→(${obj.bbox_x2??0},${obj.bbox_y2??0})</td>
+                <td>${confBar(obj.sam_confidence)}</td>
+                <td class="mono">${obj.distance_cm != null ? obj.distance_cm.toFixed(1) : '—'}</td>
+            </tr>`;
+        }).join('');
     }
 
     // ── Clear data (legacy) ───────────────────────────────────────────────────

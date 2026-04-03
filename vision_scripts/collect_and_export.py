@@ -26,6 +26,7 @@ Usage:
     ros2 run vision collect_and_export
 """
 
+import math
 import rclpy
 from rclpy.node import Node
 from std_srvs.srv import Trigger
@@ -35,6 +36,13 @@ import os
 import sys
 from datetime import datetime
 from pathlib import Path
+
+# OBB service uses custom_interfaces (optional — graceful skip if not built)
+try:
+    from custom_interfaces.srv import FindObjectAngle
+    _OBB_AVAILABLE = True
+except ImportError:
+    _OBB_AVAILABLE = False
 
 # ---------------------------------------------------------------------------
 # Output file paths  (workspace root = parent of this script's package dir)
@@ -121,7 +129,9 @@ def _export_excel(runs):
         "Run No", "Timestamp", "SAM Total Objects", "CLIP Filtered Regions",
         "Graspable Objects", "Total Relations", "Avg SAM Confidence",
         "Avg IoU", "Stability Rate (%)", "Scene Description",
-        "SAM Success", "CLIP Success", "Scene Success", "Latency (s)"
+        "SAM Success", "CLIP Success", "Scene Success", "OBB Success",
+        "Total Latency (s)", "SAM Latency (s)", "CLIP Latency (s)",
+        "Scene Latency (s)", "OBB Latency (s)"
     ]
     runs_rows = []
     for run in runs:
@@ -129,6 +139,7 @@ def _export_excel(runs):
         sam  = run.get("sam", {})
         clip = run.get("clip", {})
         scene = run.get("scene", {})
+        obb   = run.get("obb", {})
         runs_rows.append([
             meta.get("run_no", ""),
             meta.get("timestamp", ""),
@@ -143,7 +154,12 @@ def _export_excel(runs):
             sam.get("success", ""),
             clip.get("success", ""),
             scene.get("success", ""),
+            obb.get("success", ""),
             meta.get("latency_s", ""),
+            sam.get("latency_s", ""),
+            clip.get("latency_s", ""),
+            scene.get("latency_s", ""),
+            obb.get("latency_s", ""),
         ])
     _write_sheet(ws_runs, runs_headers, runs_rows)
 
@@ -154,7 +170,11 @@ def _export_excel(runs):
         "BBox X1", "BBox Y1", "BBox X2", "BBox Y2",
         "SAM Confidence", "CLIP Confidence",
         "Distance (cm)", "IoU Score", "Is Stable",
-        "Has Grasp", "Grasp Quality", "Grasp Width (m)"
+        "Has Grasp", "Grasp Quality", "Grasp Width (m)",
+        # OBB columns
+        "OBB Angle (deg)", "OBB Theta (rad)",
+        "OBB Width (px)", "OBB Height (px)",
+        "OBB Center U", "OBB Center V",
     ]
     obj_rows = []
     for run in runs:
@@ -177,6 +197,13 @@ def _export_excel(runs):
                 obj.get("has_grasp", ""),
                 grasp.get("quality_score", ""),
                 grasp.get("width_m", ""),
+                # OBB
+                obj.get("obb_angle_deg", ""),
+                obj.get("obb_theta_rad", ""),
+                obj.get("obb_width_px",  ""),
+                obj.get("obb_height_px", ""),
+                obj.get("obb_center_u",  ""),
+                obj.get("obb_center_v",  ""),
             ])
     _write_sheet(ws_obj, obj_headers, obj_rows)
 
@@ -232,6 +259,45 @@ def _export_excel(runs):
             ])
     _write_sheet(ws_grasp, grasp_headers, grasp_rows)
 
+    # ---- Sheet 5: OBB Angles ----
+    ws_obb = wb.create_sheet("OBB Angles")
+    obb_headers = [
+        "Run No", "Timestamp",
+        "Object ID", "CLIP Label",
+        "OBB Angle (deg)", "OBB Theta (rad)",
+        "OBB Width (px)", "OBB Height (px)",
+        "OBB Center U", "OBB Center V",
+        "BBox X1", "BBox Y1", "BBox X2", "BBox Y2",
+        "SAM Confidence", "Distance (cm)",
+        "OBB Latency (s)",
+    ]
+    obb_rows = []
+    for run in runs:
+        meta   = run.get("meta", {})
+        run_no = meta.get("run_no", "")
+        ts     = meta.get("timestamp", "")
+        obb_lat = run.get("obb", {}).get("latency_s", "")
+        for obj in run.get("objects", []):
+            if obj.get("obb_angle_deg", "") == "":
+                continue  # skip objects where OBB wasn't available
+            obb_rows.append([
+                run_no, ts,
+                obj.get("object_id", ""),
+                obj.get("label", ""),
+                obj.get("obb_angle_deg", ""),
+                obj.get("obb_theta_rad", ""),
+                obj.get("obb_width_px",  ""),
+                obj.get("obb_height_px", ""),
+                obj.get("obb_center_u",  ""),
+                obj.get("obb_center_v",  ""),
+                obj.get("bbox_x1", ""), obj.get("bbox_y1", ""),
+                obj.get("bbox_x2", ""), obj.get("bbox_y2", ""),
+                obj.get("sam_confidence", ""),
+                obj.get("distance_cm", ""),
+                obb_lat,
+            ])
+    _write_sheet(ws_obb, obb_headers, obb_rows)
+
     wb.save(str(EXCEL_FILE))
     print(f"[OK] Excel exported → {EXCEL_FILE}")
 
@@ -248,6 +314,13 @@ class VisionDataCollector(Node):
         self._sam_client   = self.create_client(Trigger, "/vision/run_pipeline")
         self._clip_client  = self.create_client(Trigger, "/vision/classify_bbox_filtered")
         self._scene_client = self.create_client(Trigger, "/vision/understand_scene")
+
+        # OBB client — only if custom_interfaces is built
+        if _OBB_AVAILABLE:
+            self._obb_client = self.create_client(FindObjectAngle, "/obb/find_object_angle")
+        else:
+            self._obb_client = None
+            self.get_logger().warn("custom_interfaces not found — OBB step will be skipped")
 
     # ------------------------------------------------------------------
     # Low-level call helper
@@ -273,6 +346,24 @@ class VisionDataCollector(Node):
             return False, None
         return result.success, result.message
 
+    def _call_obb(self, timeout=10.0):
+        """Call /obb/find_object_angle (FindObjectAngle service). Returns response or None."""
+        if self._obb_client is None:
+            return None
+        service_name = "/obb/find_object_angle"
+        self.get_logger().info(f"Waiting for {service_name} ...")
+        if not self._obb_client.wait_for_service(timeout_sec=5.0):
+            self.get_logger().warn(f"{service_name} not available — skipping OBB step")
+            return None
+        future = self._obb_client.call_async(FindObjectAngle.Request())
+        start = time.time()
+        while not future.done():
+            rclpy.spin_once(self, timeout_sec=0.05)
+            if time.time() - start > timeout:
+                self.get_logger().error(f"{service_name} call timed out")
+                return None
+        return future.result()
+
     # ------------------------------------------------------------------
     # Collect one run
     # ------------------------------------------------------------------
@@ -284,9 +375,10 @@ class VisionDataCollector(Node):
 
         run = {
             "meta": {"run_no": run_no, "timestamp": ts},
-            "sam":  {"success": False},
-            "clip": {"success": False},
-            "scene": {"success": False},
+            "sam":  {"success": False, "latency_s": 0.0},
+            "clip": {"success": False, "latency_s": 0.0},
+            "scene": {"success": False, "latency_s": 0.0},
+            "obb":  {"success": False, "total_objects": 0, "latency_s": 0.0},
             "objects":   [],
             "relations": [],
             "grasps":    [],
@@ -295,7 +387,9 @@ class VisionDataCollector(Node):
         # ---- 1. SAM ----
         self.get_logger().info("=" * 60)
         self.get_logger().info(f"RUN #{run_no} — Step 1: SAM /vision/run_pipeline")
+        t_sam = time.perf_counter()
         sam_ok, sam_msg = self._call(self._sam_client, "/vision/run_pipeline")
+        run["sam"]["latency_s"] = round(time.perf_counter() - t_sam, 3)
         if sam_ok and sam_msg:
             try:
                 sam_data = json.loads(sam_msg)
@@ -306,6 +400,7 @@ class VisionDataCollector(Node):
 
                 run["sam"] = {
                     "success":       True,
+                    "latency_s":     run["sam"]["latency_s"],
                     "total_detections": summary.get("total_detections", 0),
                     "avg_confidence":   circ.get("average_confidence", 0.0),
                     "average_iou":      coco.get("average_iou", 0.0),
@@ -340,12 +435,15 @@ class VisionDataCollector(Node):
 
         # ---- 2. CLIP ----
         self.get_logger().info(f"RUN #{run_no} — Step 2: CLIP /vision/classify_bbox_filtered")
+        t_clip = time.perf_counter()
         clip_ok, clip_msg = self._call(self._clip_client, "/vision/classify_bbox_filtered")
+        run["clip"]["latency_s"] = round(time.perf_counter() - t_clip, 3)
         if clip_ok and clip_msg:
             try:
                 clip_data = json.loads(clip_msg)
                 run["clip"] = {
                     "success":          True,
+                    "latency_s":        run["clip"]["latency_s"],
                     "total_sam_regions": clip_data.get("total_sam_regions", 0),
                     "filtered_regions":  clip_data.get("filtered_regions", 0),
                 }
@@ -362,12 +460,15 @@ class VisionDataCollector(Node):
 
         # ---- 3. Scene Understanding ----
         self.get_logger().info(f"RUN #{run_no} — Step 3: Scene /vision/understand_scene")
+        t_scene = time.perf_counter()
         scene_ok, scene_msg = self._call(self._scene_client, "/vision/understand_scene", timeout=15.0)
+        run["scene"]["latency_s"] = round(time.perf_counter() - t_scene, 3)
         if scene_ok and scene_msg:
             try:
                 scene_data = json.loads(scene_msg)
                 run["scene"] = {
                     "success":           True,
+                    "latency_s":         run["scene"]["latency_s"],
                     "scene_id":          scene_data.get("scene_id", ""),
                     "total_objects":     scene_data.get("total_objects", 0),
                     "total_relations":   scene_data.get("total_relations", 0),
@@ -435,6 +536,57 @@ class VisionDataCollector(Node):
                 )
             except Exception as e:
                 self.get_logger().error(f"  Scene parse error: {e}")
+
+        # ---- 4. OBB Angle Benchmark ----
+        self.get_logger().info(f"RUN #{run_no} — Step 4: OBB /obb/find_object_angle")
+        t_obb = time.perf_counter()
+        obb_resp = self._call_obb()
+        run["obb"]["latency_s"] = round(time.perf_counter() - t_obb, 3)
+
+        if obb_resp is not None and obb_resp.success:
+            run["obb"]["success"]       = True
+            run["obb"]["total_objects"] = obb_resp.total_objects
+
+            # Build a lookup: object_id -> OBB data
+            obb_by_id = {}
+            for i, oid in enumerate(obb_resp.object_ids):
+                theta_rad  = obb_resp.thetas[i]
+                # The service already stores the remapped angle (90 - geom_deg).
+                # angle_deg is directly the display angle (0° = vertical).
+                angle_deg  = math.degrees(theta_rad)
+                obb_by_id[oid] = {
+                    "obb_center_u":  obb_resp.centers_u[i],
+                    "obb_center_v":  obb_resp.centers_v[i],
+                    "obb_theta_rad": round(theta_rad, 5),
+                    "obb_angle_deg": round(angle_deg, 2),
+                    "obb_width_px":  round(obb_resp.widths[i], 2),
+                    "obb_height_px": round(obb_resp.heights[i], 2),
+                }
+
+            # Merge into existing objects list (match by object_id)
+            for obj in run["objects"]:
+                obb = obb_by_id.get(obj.get("object_id", ""))
+                if obb:
+                    obj.update(obb)
+                else:
+                    # Initialise missing OBB fields so Excel has consistent columns
+                    obj.setdefault("obb_center_u",  "")
+                    obj.setdefault("obb_center_v",  "")
+                    obj.setdefault("obb_theta_rad", "")
+                    obj.setdefault("obb_angle_deg", "")
+                    obj.setdefault("obb_width_px",  "")
+                    obj.setdefault("obb_height_px", "")
+
+            self.get_logger().info(
+                f"  OBB: {obb_resp.total_objects} objects, "
+                f"latency={run['obb']['latency_s']}s"
+            )
+        else:
+            # Ensure OBB keys exist even if service was unavailable
+            for obj in run["objects"]:
+                for k in ("obb_center_u","obb_center_v","obb_theta_rad","obb_angle_deg","obb_width_px","obb_height_px"):
+                    obj.setdefault(k, "")
+            self.get_logger().warn("  OBB: service unavailable or returned failure")
 
         # ---- Finalize ----
         run["meta"]["latency_s"] = round(time.perf_counter() - t0, 3)
