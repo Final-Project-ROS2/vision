@@ -356,6 +356,17 @@ class BenchmarkDashboard(Node):
                     self.end_headers()
                     data_json = json.dumps(self.dashboard_node.data)
                     self.wfile.write(data_json.encode())
+                elif self.path == '/api/run-history':
+                    # Serve vision_runs_history.json from workspace root
+                    history_file = package_path / 'vision_runs_history.json'
+                    self.send_response(200)
+                    self.send_header('Content-type', 'application/json')
+                    self.send_header('Access-Control-Allow-Origin', '*')
+                    self.end_headers()
+                    if history_file.exists():
+                        self.wfile.write(history_file.read_bytes())
+                    else:
+                        self.wfile.write(b'[]')
                 else:
                     # Serve static files
                     super().do_GET()
