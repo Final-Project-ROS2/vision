@@ -51,10 +51,12 @@ class PixelToRealNode(Node):
         #   error = (x - x^, y - y^, z - z^)
         #   t_base_cam_new = t_base_cam_old + error
         # This compensates for calibration errors in the camera position.
+        # Practically: put the silver tip of the tape measure where the center of the gripper is, read the distance to the center of the cube
+        # see what direction (- or +) the read is, add that
         # Benchmark:
         # LOW: (-0.0386, 0.5303, 0.5238)
         # HIGH: (-0.0361, 0.5303, 0.6458)
-        self.t_base_cam = np.array([-0.0361, 0.5303, 0.6458])
+        self.t_base_cam = np.array([-0.146, 0.635, 0.8])
 
         self.R_base_cam = np.array([
             [1.0,  0.0,  0.0],
