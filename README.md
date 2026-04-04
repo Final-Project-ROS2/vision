@@ -26,7 +26,7 @@ height = 73.66cm or 29 inch
 ```bash
 cd ~/final_project_ws
 source install/setup.bash
-source vision_venv/bin/activate
+source real_vision_venv/bin/activate
 ```
 
 
@@ -42,7 +42,9 @@ colcon build
 **Option A - Single Launch Command (Recommended):**
 ```bash
 source install/setup.bash
-ros2 launch ur_yt_sim final_project.launch.py mode:=real
+ros2 launch project_launcher final_project.launch.py
+
+#ros2 launch ur_yt_sim final_project.launch.py mode:=real
 ```
 argument
 
