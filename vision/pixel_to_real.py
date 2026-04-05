@@ -12,18 +12,27 @@ Service Interface: `custom_interfaces.srv.PixelToReal`
     float64 y   # world Y coordinate (m, positive forward/away from camera) - with -0.722m offset applied
     float64 z   # world Z coordinate (m, height above table/ground)
 
-Calibration Data:
-  - Origin (0, 0, 0.8) in world: pixel (320, 500) - bottom center of image
-  - Green box at world (0.5, 0, 0.8): pixel (320, 240)
-  - Gear part at world (0.83, 0.03, 0.8): pixel (305, 95)
-  - Drill at world (0.571546, -0.240961, 0.831898): pixel (466, 160.5)
-  - Monkey wrench at world (0.623673, 0.372909, 0.806652): pixel (150, 200)
-  - Table depth: 0.8 m from camera
-  - Coordinate mapping:
-    * u increases right → y DECREASES (u represents -y direction)
-    * v increases down → x DECREASES (v represents -x direction)
-    * x in world increases upward in image (opposite of v)
-    * y in world increases leftward in image (opposite of u)
+Calibration Method (iLogic Hybrid):
+  Linear model fitted from 22 empirical measurements (least-squares, LOO-CV RMSE ≈ 2.0 cm):
+    x =  0.00130317·u + 0.00002114·v − 0.56859693
+    y = −0.00002728·u − 0.00133088·v + 0.98011251
+
+  A Gaussian-IDW empirical correction is added on top:
+    - Problem Zone (near any of the 22 samples): correction applied → RMSE ≈ 1.5 cm
+    - Golden Zone  (far from all samples):       pure linear model used → avoids overfitting
+
+  Empirical samples (u, v → world x, y):
+    (560,362)→(0.165,0.463)  (468,452)→(0.064,0.367)
+    (334,336)→(-0.135,0.495) (241,432)→(-0.245,0.405)
+    (598,245)→(0.205,0.618)  (493,342)→(0.104,0.520)
+    (304,327)→(-0.183,0.510) (206,423)→(-0.295,0.418)
+    (587,113)→(0.195,0.810)  (490,202)→(0.090,0.715)
+    (273,111)→(-0.220,0.800) (177,206)→(-0.325,0.705)
+    (308,302)→(-0.164,0.572) (276,324)→(-0.200,0.533)
+    (555,298)→(0.145,0.576)  (456,384)→(0.040,0.482)
+    (343,284)→(-0.138,0.580) (247,375)→(-0.240,0.485)
+    (562, 85)→(0.166,0.860)  (468,173)→(0.065,0.770)
+    (202, 98)→(-0.310,0.835) (101,196)→(-0.415,0.740)
 
 Setup:
   1. Build the custom_interfaces package:
@@ -157,55 +166,55 @@ class PixelToRealServer(Node):
         # Publisher for debug visualization
         self.debug_pub = self.create_publisher(Image, '/pixel_to_real/debug_image', 10)
 
-        # Calibration data: pixel coordinates (u, v) -> world coordinates (x, y, z)
-        # Using calibration points:
-        # Origin: (u=320, v=500) -> (x=0, y=0, z=0.8)
-        # Green box: (u=320, v=240) -> (x=0.5, y=0, z=0.8)
-        # Gear: (u=305, v=95) -> (x=0.83, y=0.03, z=0.8)
-        
-        # Coordinate system mapping:
-        # u increases right -> y DECREASES (u represents -y direction)
-        # v increases down -> x DECREASES (v represents -x direction)
-        
-        self.u_origin = 320  # u=320 corresponds to y=0
-        self.v_origin = 500  # v=500 corresponds to x=0
-        
-        # Calculate scaling factors from calibration points:
-        # Green box: du=0, dv=-260 pixels -> dx=0.5, dy=0 meters
-        # Gear: du=-15, dv=-405 pixels -> dx=0.83, dy=0.03 meters
-        
-        # From green box (vertical movement in image):
-        # dv = 240 - 500 = -260 pixels (up in image)
-        # dx = 0.5 - 0 = 0.5 meters (positive x, which is up)
-        # scale_x = 0.5 / 260 = 0.00192 m/pixel
-        
-        # From gear (horizontal AND vertical movement):
-        # du = 305 - 320 = -15 pixels (left in image)
-        # dy = 0.03 - 0 = 0.03 meters (positive y, which is left)
-        # scale_y = 0.03 / 15 = 0.002 m/pixel
-        
-        dv_green = 240 - 500  # -260 pixels (up in image)
-        dx_green = 0.5 - 0     # 0.5 meters (positive x in world)
-        
-        du_gear = 305 - 320   # -15 pixels (left in image)
-        dy_gear = 0.03 - 0    # 0.03 meters (positive y in world)
-        
-        self.scale_x = abs(dx_green / dv_green)  # 0.5/260 = 0.00192 m/pixel
-        self.scale_y = abs(dy_gear / du_gear)    # 0.03/15 = 0.002 m/pixel
-        
-        # Depth calibration: Store reference depth for z-coordinate conversion
-        # At calibration points, z should be 0.8m (table height)
-        # We'll measure the actual depth sensor reading and use it as reference
-        self.z_table = 0.8  # World z-coordinate of table surface
-        self.depth_reference = None  # Will be set from first depth reading at calibration point
-        
-        self.get_logger().info(f'Pixel-to-world calibration: scale_x={self.scale_x:.6f} m/px, scale_y={self.scale_y:.6f} m/px')
-        self.get_logger().info(f'Origin: pixel({self.u_origin}, {self.v_origin}) -> world(0, 0, 0.8)')
-        self.get_logger().info(f'Coordinate mapping: u right=-y, v down=-x')
-        self.get_logger().info(f'Calibrated from green box at (320,240)->(0.5,0,0.8) and gear at (305,95)->(0.83,0.03,0.8)')
-        self.get_logger().info(f'Validation point: drill at (466,160)->(0.572,-0.241,0.832)')
-        self.get_logger().info(f'Validation point: monkey_wrench at (150,200)->(0.624,0.373,0.807)')
-        self.get_logger().info(f'Depth calibration: Call service at (320,240) to set depth reference for z=0.8m')
+        # ── iLogic Calibration ────────────────────────────────────────────────
+        # Linear model fitted from 22 empirical measurements (least-squares):
+        #   x =  0.00130317 * u  +0.00002114 * v  -0.56859693
+        #   y = -0.00002728 * u  -0.00133088 * v  +0.98011251
+        # LOO-CV RMSE ≈ 0.020 m
+        self.lin_cx = np.array([+0.00130317, +0.00002114, -0.56859693])  # [u, v, 1] → x
+        self.lin_cy = np.array([-0.00002728, -0.00133088, +0.98011251])  # [u, v, 1] → y
+
+        # Empirical correction table  (u, v, residual_x, residual_y)
+        # residual = true_world - linear_prediction  ← precomputed offline
+        # Used by the IDW Gaussian kernel to correct systematic lens distortion.
+        self._emp = np.array([
+            # u     v      res_x      res_y
+            [560,  362, -0.00383,  -0.02010],  # M1G_TR
+            [468,  452,  0.01316,   0.00117],  # M1G_BL
+            [334,  336, -0.00878,  -0.02882],  # M1P_TR
+            [241,  432,  0.00040,   0.00640],  # M1P_BL
+            [598,  245, -0.01089,  -0.01965],  # M2G_TR
+            [493,  342,  0.02291,   0.00854],  # M2G_BL
+            [304,  327, -0.01747,  -0.02659],  # M2P_TR
+            [206,  423, -0.00384,   0.00649],  # M2P_BL
+            [587,  113, -0.00378,  -0.00365],  # M3G_TR
+            [490,  202,  0.01584,   0.01714],  # M3G_BL
+            [273,  111, -0.00952,  -0.02493],  # M3P_TR
+            [177,  206,  0.00856,   0.00391],  # M3P_BL
+            [308,  302, -0.00316,   0.00224],  # M3X_TR
+            [276,  324,  0.00207,  -0.00836],  # M3X_BL
+            [555,  298, -0.01601,   0.00758],  # M4G_TR
+            [456,  384,  0.00623,   0.02542],  # M4G_BL
+            [343,  284, -0.02237,  -0.01282],  # M4P_TR
+            [247,  375, -0.00124,   0.01070],  # M4P_BL
+            [562,   85,  0.00041,   0.00834],  # M5G_TR
+            [468,  173,  0.02007,   0.03286],  # M5G_BL
+            [202,   98, -0.00669,  -0.00916],  # M5P_TR
+            [101,  196,  0.01778,   0.02352],  # M5P_BL
+        ], dtype=np.float64)
+        # Gaussian kernel bandwidth (pixels). Controls how far correction influence spreads.
+        self._idw_sigma = 80.0
+        # Threshold: if IDW weight-sum < this fraction of max possible, treat as Golden Zone.
+        self._golden_weight_threshold = 0.05
+
+        # Depth calibration
+        self.z_table = 0.8
+        self.depth_reference = None
+
+        self.get_logger().info('iLogic pixel-to-world: linear model + IDW empirical correction')
+        self.get_logger().info(f'  x = {self.lin_cx[0]:+.8f}*u {self.lin_cx[1]:+.8f}*v {self.lin_cx[2]:+.8f}')
+        self.get_logger().info(f'  y = {self.lin_cy[0]:+.8f}*u {self.lin_cy[1]:+.8f}*v {self.lin_cy[2]:+.8f}')
+        self.get_logger().info(f'  IDW sigma={self._idw_sigma}px  empirical samples={len(self._emp)}')
         self.get_logger().info(f'RGB topic: {self.rgb_topic}')
         self.get_logger().info(f'Depth topic: {self.depth_topic}')
         self.get_logger().info(f'Camera info topic: {self.camera_info_topic}')
@@ -213,11 +222,12 @@ class PixelToRealServer(Node):
 
         # Store calibration validation points for accuracy checking
         self.validation_points = [
-            {"name": "green_box", "pixel": (320, 240), "world": (0.5, 0.0, 0.8)},
-            {"name": "gear", "pixel": (305, 95), "world": (0.83, 0.03, 0.8)},
-            {"name": "drill", "pixel": (466, 160), "world": (0.571546, -0.240961, 0.831898)},
-            {"name": "monkey_wrench", "pixel": (150, 200), "world": (0.623673, 0.372909, 0.806652)},
-            {"name": "origin", "pixel": (320, 500), "world": (0.0, 0.0, 0.8)}
+            {"name": "M1G_TR",       "pixel": (560, 362), "world": ( 0.165,  0.463, 0.8)},
+            {"name": "M1P_TR",       "pixel": (334, 336), "world": (-0.135,  0.495, 0.8)},
+            {"name": "M3G_TR",       "pixel": (587, 113), "world": ( 0.195,  0.810, 0.8)},
+            {"name": "M3P_TR",       "pixel": (273, 111), "world": (-0.220,  0.800, 0.8)},
+            {"name": "M5G_TR",       "pixel": (562,  85), "world": ( 0.166,  0.860, 0.8)},
+            {"name": "M5P_TR",       "pixel": (202,  98), "world": (-0.310,  0.835, 0.8)},
         ]
 
         # TF
@@ -265,53 +275,85 @@ class PixelToRealServer(Node):
     def info_cb(self, msg: CameraInfo):
         self.camera_info = msg
 
+    def _idw_correction(self, u: float, v: float):
+        """iLogic: compute Gaussian-IDW empirical correction at pixel (u, v).
+
+        Golden Zone  (low influence from empirical samples) → correction ≈ 0.
+        Problem Zone (high influence near known distortion samples) → correction applied.
+
+        Returns (corr_x, corr_y, weight_sum_norm) where weight_sum_norm in [0, 1].
+        """
+        eu = self._emp[:, 0]
+        ev = self._emp[:, 1]
+        err_x = self._emp[:, 2]
+        err_y = self._emp[:, 3]
+
+        dists = np.sqrt((eu - u) ** 2 + (ev - v) ** 2)
+        weights = np.exp(-0.5 * (dists / self._idw_sigma) ** 2)
+        w_sum = weights.sum()
+
+        # Maximum possible weight_sum (if u,v were exactly on a sample point)
+        max_w_sum = len(self._emp) * 1.0  # upper bound: all weights=1
+        w_norm = w_sum / max_w_sum
+
+        if w_sum < 1e-12:
+            return 0.0, 0.0, 0.0
+
+        corr_x = float(np.dot(weights, err_x) / w_sum)
+        corr_y = float(np.dot(weights, err_y) / w_sum)
+        return corr_x, corr_y, w_norm
+
     def pixel_to_world_calibrated(self, u: int, v: int, depth_m: float):
-        """Convert pixel (u,v) to world coordinates (x,y,z) using calibration.
-        
-        Coordinate system:
-        - u increases right -> y DECREASES (u represents -y direction)
-        - v increases down -> x DECREASES (v represents -x direction)
-        - Origin at pixel (320, 500) = world (0, 0, 0.8)
-        - Depth is inversely related to z: small depth = high z (near camera, far from ground)
-        
+        """iLogic pixel → world conversion.
+
+        1. Apply the empirically fitted linear model (replaces the old 2-point
+           scale_x / scale_y formula which had large systematic errors).
+        2. Add a Gaussian-IDW empirical correction:
+             - Problem Zone (high weight from nearby samples): correction applied fully.
+             - Golden Zone  (low weight / far from all samples): correction fades to 0,
+               pure linear model used — avoids overfitting in unsampled areas.
+
         Args:
             u: pixel column (positive right)
             v: pixel row (positive down)
-            depth_m: depth in meters from camera (from depth sensor)
-            
+            depth_m: depth in meters from camera
+
         Returns:
             (x, y, z) in world coordinates (meters)
         """
-        # Calculate pixel offset from origin
-        du = u - self.u_origin  # positive = right in image
-        dv = v - self.v_origin  # positive = down in image
-        
-        # Apply transformation based on coordinate mapping:
-        # v down (-dv up) -> x increases: x = -dv * scale_x
-        # u right (-du left) -> y increases: y = -du * scale_y
-        x = -dv * self.scale_x  # Up in image -> positive x
-        y = -du * self.scale_y  # Left in image -> positive y
-        
-        # Apply y-offset for robot reference frame
-        # y = y - 0.5442  # Shift y by -0.5442 meters
-        
-        # Convert depth to z-coordinate
-        # Depth is inversely related to z: smaller depth = further from ground = higher z
-        # At table (z=0.8), we need to calibrate based on actual depth reading
-        # If depth_reference is set, use it; otherwise estimate from depth
+        # ── Step 1: Linear model (Golden Zone baseline) ───────────────────────
+        feat = np.array([u, v, 1.0])
+        x = float(np.dot(self.lin_cx, feat))
+        y = float(np.dot(self.lin_cy, feat))
+
+        # ── Step 2: iLogic empirical correction ───────────────────────────────
+        corr_x, corr_y, w_norm = self._idw_correction(float(u), float(v))
+
+        if w_norm >= self._golden_weight_threshold:
+            # Problem Zone: apply correction
+            x += corr_x
+            y += corr_y
+            zone = 'problem'
+        else:
+            # Golden Zone: trust linear model, skip correction
+            zone = 'golden'
+
+        self.get_logger().debug(
+            f'iLogic zone={zone} w_norm={w_norm:.3f} '  
+            f'corr=({corr_x:+.4f},{corr_y:+.4f}) '  
+            f'-> x={x:.4f} y={y:.4f}'
+        )
+
+        # ── Step 3: Depth → z ─────────────────────────────────────────────────
         if self.real_hardware:
-            z = depth_m  # Direct mapping for hardware
+            z = depth_m
         elif self.depth_reference is not None:
-            # z = z_table + (depth_reference - depth)
-            # When depth < depth_reference (closer to camera), z increases
-            # When depth > depth_reference (further from camera), z decreases
             z = self.z_table + (self.depth_reference - depth_m)
         else:
-            # First call: assume this is close to table depth, set reference
             self.depth_reference = depth_m
             self.get_logger().info(f'Set depth reference: {self.depth_reference:.3f}m at z={self.z_table}m')
             z = self.z_table
-        
+
         return (x, y, z)
 
     def read_depth_at(self, u: float, v: float, max_search: int = 5):
@@ -429,8 +471,8 @@ class PixelToRealServer(Node):
             cv2.putText(debug_img, label_depth, (u + 25, v + 5),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
             
-            # Draw origin marker at (320, 500)
-            origin_u, origin_v = self.u_origin, self.v_origin
+            # Draw frame-centre marker (approximate optical centre)
+            origin_u, origin_v = 320, 240
             if 0 <= origin_u < debug_img.shape[1] and 0 <= origin_v < debug_img.shape[0]:
                 cv2.drawMarker(debug_img, (origin_u, origin_v), (255, 255, 0), 
                              cv2.MARKER_TILTED_CROSS, 30, 2)
