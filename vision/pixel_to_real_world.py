@@ -56,7 +56,7 @@ class PixelToRealNode(Node):
         # Benchmark:
         # LOW: (-0.0386, 0.5303, 0.5238)
         # HIGH: (-0.0361, 0.5303, 0.6458)
-        self.t_base_cam = np.array([-0.146, 0.635, 0.8])
+        self.t_base_cam = np.array([-0.146, 0.635, 0.802])
 
         self.R_base_cam = np.array([
             [1.0,  0.0,  0.0],
