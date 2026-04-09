@@ -485,7 +485,15 @@ class SimpleSAMDetector(Node):
                     f"conf={confidences[i]:.2f}, dist={distances_cm[i]:.1f}cm"
                 )
             self.get_logger().info("=" * 80)
-            
+
+            # Save results to vision_runs_history.json for real-time dashboard
+            end_inner = time.perf_counter()
+            self._save_detect_objects_run(
+                object_ids, bbox_x1, bbox_y1, bbox_x2, bbox_y2,
+                confidences, distances_cm, iou_scores, is_stable_array,
+                clip_classifications, end_inner - start
+            )
+
         except Exception as e:
             response.success = False
             response.total_detections = 0
@@ -509,8 +517,102 @@ class SimpleSAMDetector(Node):
         end = time.perf_counter()
         latency = end - start
         self.get_logger().info(f"Total detection latency: {latency:.6f} seconds")
-        
+
         return response
+
+    def _save_detect_objects_run(self, object_ids, bbox_x1, bbox_y1, bbox_x2, bbox_y2,
+                                  confidences, distances_cm, iou_scores, is_stable_array,
+                                  clip_classifications, latency_s):
+        """Save /vision/detect_objects results to vision_runs_history.json for the dashboard."""
+        try:
+            from pathlib import Path
+
+            # Same path used by benchmark_dashboard and collect_and_export
+            package_path = Path(__file__).parent.parent
+            history_file = package_path / 'vision_runs_history.json'
+
+            # Load existing history
+            history = []
+            if history_file.exists():
+                try:
+                    with open(history_file, 'r') as f:
+                        data = json.load(f)
+                    if isinstance(data, list):
+                        history = data
+                except Exception:
+                    pass
+
+            last_run_no = history[-1]['meta']['run_no'] if history else 0
+            run_no = last_run_no + 1
+
+            num_dets = len(self.latest_detections)
+            total_sam_conf = 0.0
+            objects = []
+            for idx in range(num_dets):
+                det = self.latest_detections[idx]
+                clip_info = clip_classifications.get(idx, {})
+                sam_conf = float(det.get('confidence', 0.0))
+                total_sam_conf += sam_conf
+                objects.append({
+                    'object_id':      object_ids[idx] if idx < len(object_ids) else f'object_{idx}',
+                    'label':          clip_info.get('label', '') if clip_info else '',
+                    'bbox_x1':        bbox_x1[idx] if idx < len(bbox_x1) else 0,
+                    'bbox_y1':        bbox_y1[idx] if idx < len(bbox_y1) else 0,
+                    'bbox_x2':        bbox_x2[idx] if idx < len(bbox_x2) else 0,
+                    'bbox_y2':        bbox_y2[idx] if idx < len(bbox_y2) else 0,
+                    'sam_confidence': round(sam_conf, 4),
+                    'clip_confidence': round(float(clip_info.get('confidence', 0.0)), 4) if clip_info else '',
+                    'distance_cm':    distances_cm[idx] if idx < len(distances_cm) else '',
+                    'iou_score':      iou_scores[idx] if idx < len(iou_scores) else '',
+                    'is_stable':      is_stable_array[idx] if idx < len(is_stable_array) else '',
+                    'has_grasp':      False,
+                    'grasp':          {},
+                    'obb_angle_deg':  '', 'obb_theta_rad': '',
+                    'obb_width_px':   '', 'obb_height_px': '',
+                    'obb_center_u':   '', 'obb_center_v':  '',
+                })
+
+            avg_sam_conf = total_sam_conf / num_dets if num_dets > 0 else 0.0
+            avg_iou = sum(iou_scores) / len(iou_scores) if iou_scores else 0.0
+            stability_rate = sum(1 for s in is_stable_array if s) / len(is_stable_array) if is_stable_array else 0.0
+
+            run = {
+                'meta': {
+                    'run_no':    run_no,
+                    'timestamp': datetime.utcnow().isoformat() + 'Z',
+                    'latency_s': round(latency_s, 3),
+                    'source':    'detect_objects',
+                },
+                'sam': {
+                    'success':          True,
+                    'latency_s':        round(latency_s, 3),
+                    'total_detections': num_dets,
+                    'avg_confidence':   round(avg_sam_conf, 4),
+                    'average_iou':      round(avg_iou, 4),
+                    'stability_rate':   round(stability_rate, 4),
+                },
+                'clip': {
+                    'success':          bool(clip_classifications),
+                    'latency_s':        0.0,
+                    'filtered_regions': len(clip_classifications),
+                },
+                'scene': {'success': False, 'latency_s': 0.0},
+                'obb':   {'success': False, 'latency_s': 0.0},
+                'objects':   objects,
+                'relations': [],
+                'grasps':    [],
+            }
+
+            history.append(run)
+            history = history[-20:]  # keep last 20 runs
+
+            with open(history_file, 'w') as f:
+                json.dump(history, f, indent=2)
+
+            self.get_logger().info(f"Saved run #{run_no} to {history_file} ({num_dets} objects)")
+
+        except Exception as e:
+            self.get_logger().warn(f"Failed to save run history: {e}")
 
     def _startup_announce(self):
         """One-shot announce to make sure global topics appear after node startup."""

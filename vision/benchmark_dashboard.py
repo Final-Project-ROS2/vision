@@ -25,6 +25,7 @@ from rclpy.callback_groups import ReentrantCallbackGroup
 from std_srvs.srv import Trigger
 from std_msgs.msg import String
 import json
+import numpy as np
 import time
 from datetime import datetime
 from http.server import HTTPServer, SimpleHTTPRequestHandler
@@ -43,6 +44,18 @@ try:
 except ImportError:
     CUSTOM_INTERFACES_AVAILABLE = False
     print("Custom interfaces not available. Build custom_interfaces package first.")
+
+
+class _ROSJSONEncoder(json.JSONEncoder):
+    """JSON encoder that handles ROS/numpy integer and float types."""
+    def default(self, obj):
+        if isinstance(obj, (np.integer,)):
+            return int(obj)
+        if isinstance(obj, (np.floating,)):
+            return float(obj)
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        return super().default(obj)
 
 
 class BenchmarkDashboard(Node):
@@ -152,20 +165,20 @@ class BenchmarkDashboard(Node):
                 'frame_id': msg.header.frame_id,
                 'obj_id': detection.object_id,
                 'bbox': {
-                    'x1': detection.bbox[0],
-                    'y1': detection.bbox[1],
-                    'x2': detection.bbox[2],
-                    'y2': detection.bbox[3]
+                    'x1': int(detection.bbox[0]),
+                    'y1': int(detection.bbox[1]),
+                    'x2': int(detection.bbox[2]),
+                    'y2': int(detection.bbox[3])
                 },
                 'center': {
-                    'u': detection.center[0],
-                    'v': detection.center[1]
+                    'u': int(detection.center[0]),
+                    'v': int(detection.center[1])
                 },
                 'confidence': float(detection.confidence),
-                'area': detection.area,
+                'area': int(detection.area),
                 'distance_cm': float(detection.distance_cm),
                 'iou_score': float(detection.iou_score),
-                'is_stable': detection.is_stable_detection,
+                'is_stable': bool(detection.is_stable_detection),
                 'ap_iou_threshold': 0.5 if detection.is_stable_detection else 0.0
             }
             
@@ -193,10 +206,10 @@ class BenchmarkDashboard(Node):
         scene_data = {
             'timestamp': timestamp,
             'scene_id': msg.scene_id,
-            'total_objects': msg.total_objects,
+            'total_objects': int(msg.total_objects),
             'relations': relations,
             'object_labels': list(msg.object_labels),
-            'object_counts': list(msg.object_counts),
+            'object_counts': [int(c) for c in msg.object_counts],
             'graspable_objects': msg.graspable_objects,
             'average_distance_cm': float(msg.average_distance_cm),
             'scene_description': msg.scene_description,
@@ -276,10 +289,10 @@ class BenchmarkDashboard(Node):
             'timestamp': timestamp,
             'test_id': len(self.data['grasp_detections']) + 1,
             'object_id': grasp_pose.object_id,
-            'bbox': list(grasp_pose.bbox),
+            'bbox': [int(v) for v in grasp_pose.bbox],
             'pixel_position': {
-                'u': grasp_pose.bbox[0] + (grasp_pose.bbox[2] - grasp_pose.bbox[0]) // 2,
-                'v': grasp_pose.bbox[1] + (grasp_pose.bbox[3] - grasp_pose.bbox[1]) // 2
+                'u': int(grasp_pose.bbox[0]) + (int(grasp_pose.bbox[2]) - int(grasp_pose.bbox[0])) // 2,
+                'v': int(grasp_pose.bbox[1]) + (int(grasp_pose.bbox[3]) - int(grasp_pose.bbox[1])) // 2
             },
             'world_position': {
                 'x': float(grasp_pose.position.x),
@@ -302,7 +315,7 @@ class BenchmarkDashboard(Node):
     def publish_data(self):
         """Publish benchmark data to topic"""
         msg = String()
-        msg.data = json.dumps(self.data)
+        msg.data = json.dumps(self.data, cls=_ROSJSONEncoder)
         self.data_publisher.publish(msg)
     
     def clear_data_callback(self, request, response):
@@ -327,18 +340,25 @@ class BenchmarkDashboard(Node):
     
     def start_http_server(self):
         """Start HTTP server for dashboard"""
-        # Get the path to the HTML file
+        # Resolve dashboard HTML using ament share directory (correct for installed packages)
+        try:
+            from ament_index_python.packages import get_package_share_directory
+            share_dir = get_package_share_directory('vision')
+            html_dir = Path(share_dir) / 'dashboard'
+        except Exception:
+            html_dir = Path(__file__).parent.parent / 'dashboard'
+
+        # History JSON is written by simple_sam_detector next to the installed module
         package_path = Path(__file__).parent.parent
-        html_dir = package_path / 'dashboard'
-        
-        # Create dashboard directory if it doesn't exist
-        html_dir.mkdir(exist_ok=True)
-        
-        # Create HTML file if it doesn't exist
+
+        self.get_logger().info(f'Dashboard HTML dir: {html_dir}')
+
+        # Fallback: create default HTML if share dir has no index.html
         html_file = html_dir / 'index.html'
         if not html_file.exists():
             self.get_logger().warn(f'Dashboard HTML not found at {html_file}')
             self.get_logger().warn('Creating basic HTML file...')
+            html_dir.mkdir(exist_ok=True)
             self.create_default_html(html_file)
         
         # Custom handler that serves files from html_dir and provides data endpoint
@@ -354,7 +374,7 @@ class BenchmarkDashboard(Node):
                     self.send_header('Content-type', 'application/json')
                     self.send_header('Access-Control-Allow-Origin', '*')
                     self.end_headers()
-                    data_json = json.dumps(self.dashboard_node.data)
+                    data_json = json.dumps(self.dashboard_node.data, cls=_ROSJSONEncoder)
                     self.wfile.write(data_json.encode())
                 elif self.path == '/api/run-history':
                     # Serve vision_runs_history.json from workspace root
