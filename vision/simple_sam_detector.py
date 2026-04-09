@@ -609,100 +609,218 @@ class SimpleSAMDetector(Node):
         
         return response
     
+    def _build_shadow_mask(self, rgb_image: np.ndarray) -> np.ndarray:
+        """
+        Build a binary mask that suppresses shadow regions.
+
+        Shadows reduce luminance but preserve chromaticity (colour ratio).
+        Two complementary methods are fused so that dark-coloured objects
+        (e.g. black cubes) are not wrongly removed:
+
+        1. HSV: dark pixels whose saturation/value ratio is very low
+           → achromatic darkness = shadow, not a coloured object.
+        2. Lab chromaticity: dark pixels whose chroma (sqrt(a²+b²)) is
+           very small → colourless darkness = shadow.
+
+        A pixel is only marked as shadow when BOTH methods agree, which
+        greatly reduces false positives on genuinely dark objects.
+
+        Returns:
+            non_shadow_mask: uint8 (255 = keep, 0 = shadow)
+        """
+        # --- Method 1: HSV saturation-value ratio ---
+        hsv = cv2.cvtColor(rgb_image, cv2.COLOR_BGR2HSV).astype(np.float32)
+        s_chan = hsv[:, :, 1]   # 0–255
+        v_chan = hsv[:, :, 2]   # 0–255
+
+        is_dark_hsv = v_chan < 85                              # < ~33 % brightness
+        sv_ratio = np.where(v_chan > 5, s_chan / (v_chan + 1e-5), 0.0)
+        is_achromatic_hsv = sv_ratio < 0.12                   # very desaturated
+
+        shadow_hsv = (is_dark_hsv & is_achromatic_hsv).astype(np.uint8) * 255
+
+        # --- Method 2: Lab chromaticity ---
+        lab = cv2.cvtColor(rgb_image, cv2.COLOR_BGR2Lab).astype(np.float32)
+        l_chan = lab[:, :, 0]
+        a_chan = lab[:, :, 1] - 128.0
+        b_chan = lab[:, :, 2] - 128.0
+        chroma = np.sqrt(a_chan ** 2 + b_chan ** 2)
+
+        is_dark_lab = l_chan < 80    # < ~31 % lightness
+        is_low_chroma = chroma < 12  # virtually colourless
+
+        shadow_lab = (is_dark_lab & is_low_chroma).astype(np.uint8) * 255
+
+        # --- Fuse: shadow only when both methods agree ---
+        shadow_combined = cv2.bitwise_and(shadow_hsv, shadow_lab)
+
+        # Morphological cleanup: expand shadow regions slightly to cover penumbra
+        k_close = np.ones((9, 9), np.uint8)
+        k_dilate = np.ones((5, 5), np.uint8)
+        shadow_clean = cv2.morphologyEx(shadow_combined, cv2.MORPH_CLOSE, k_close, iterations=2)
+        shadow_clean = cv2.morphologyEx(shadow_clean, cv2.MORPH_DILATE, k_dilate, iterations=1)
+
+        return cv2.bitwise_not(shadow_clean)   # 255 = non-shadow
+
+    def _is_shadow_contour(
+        self,
+        contour,
+        hsv_image: np.ndarray,
+        img_h: int,
+        img_w: int,
+    ) -> bool:
+        """
+        Per-contour shadow heuristics (applied after pixel-level masking as a
+        second line of defence).
+
+        Rejects a contour if it passes ANY of three shadow signatures:
+        1. Low solidity  – cast shadows are irregular / concave.
+        2. Extreme aspect ratio – elongated cast shadows.
+        3. Low mean saturation inside the contour – achromatic region.
+        """
+        area = cv2.contourArea(contour)
+        if area < 1:
+            return False
+
+        # 1. Solidity: area / convex-hull area
+        hull = cv2.convexHull(contour)
+        hull_area = cv2.contourArea(hull)
+        solidity = area / hull_area if hull_area > 0 else 0.0
+        if solidity < 0.35:
+            return True
+
+        # 2. Aspect ratio
+        _, _, w_box, h_box = cv2.boundingRect(contour)
+        aspect = max(w_box, h_box) / (min(w_box, h_box) + 1e-5)
+        if aspect > 7.0:
+            return True
+
+        # 3. Mean saturation inside contour mask
+        contour_mask = np.zeros((img_h, img_w), dtype=np.uint8)
+        cv2.drawContours(contour_mask, [contour], -1, 255, -1)
+        s_values = hsv_image[:, :, 1][contour_mask == 255]
+        mean_sat = float(s_values.mean()) if s_values.size > 0 else 0.0
+        if mean_sat < 18:
+            return True
+
+        return False
+
     def _detect_objects(self, rgb_image: np.ndarray) -> List[Dict]:
         """
         Detect objects using OpenCV contour detection (SAM-style segmentation)
-        with multiple fallback methods for robustness
-        
+        with multiple fallback methods for robustness.
+
+        Shadow suppression is applied at two levels:
+        - Pixel level: shadow mask (HSV + Lab) zeroes out shadow pixels in all
+          threshold images before contour extraction.
+        - Contour level: solidity, aspect-ratio, and mean-saturation checks
+          reject contours that still resemble cast shadows.
+
         Args:
             rgb_image: BGR image from OpenCV
-            
+
         Returns:
             List of detection dictionaries with bbox, mask, confidence
         """
         if rgb_image is None:
             self.get_logger().warn("Detection called with None image")
             return []
-        
+
         h, w = rgb_image.shape[:2]
         self.get_logger().info(f"Detecting objects in image: {w}x{h}")
-        
+
+        # Pre-compute HSV once – reused for shadow mask and per-contour checks
+        hsv_image = cv2.cvtColor(rgb_image, cv2.COLOR_BGR2HSV)
+
+        # Build shadow suppression mask (255 = non-shadow pixel)
+        shadow_mask = self._build_shadow_mask(rgb_image)
+        shadow_pct = 100.0 * float((shadow_mask == 0).sum()) / (h * w)
+        self.get_logger().info(f"Shadow suppression: {shadow_pct:.1f}% of pixels masked as shadow")
+
         # Convert to grayscale
         gray = cv2.cvtColor(rgb_image, cv2.COLOR_BGR2GRAY)
-        
+
         # Apply Gaussian blur to reduce noise
         blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-        
+
         # Try multiple detection methods for robustness
         all_contours = []
-        
+
         # Method 1: Adaptive thresholding
         try:
             thresh_adaptive = cv2.adaptiveThreshold(
-                blurred, 255, 
+                blurred, 255,
                 cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                cv2.THRESH_BINARY_INV, 
+                cv2.THRESH_BINARY_INV,
                 11, 2
             )
             kernel = np.ones((3, 3), np.uint8)
             thresh_adaptive = cv2.morphologyEx(thresh_adaptive, cv2.MORPH_CLOSE, kernel, iterations=2)
             thresh_adaptive = cv2.morphologyEx(thresh_adaptive, cv2.MORPH_OPEN, kernel, iterations=1)
+            # Remove shadow pixels before contour extraction
+            thresh_adaptive = cv2.bitwise_and(thresh_adaptive, thresh_adaptive, mask=shadow_mask)
             contours_adaptive, _ = cv2.findContours(thresh_adaptive, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             all_contours.extend(contours_adaptive)
             self.get_logger().info(f"Adaptive threshold found {len(contours_adaptive)} contours")
         except Exception as e:
             self.get_logger().warn(f"Adaptive threshold failed: {e}")
-        
+
         # Method 2: Otsu's thresholding (works better for bimodal images)
         try:
             _, thresh_otsu = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
             kernel = np.ones((3, 3), np.uint8)
             thresh_otsu = cv2.morphologyEx(thresh_otsu, cv2.MORPH_CLOSE, kernel, iterations=2)
+            # Remove shadow pixels before contour extraction
+            thresh_otsu = cv2.bitwise_and(thresh_otsu, thresh_otsu, mask=shadow_mask)
             contours_otsu, _ = cv2.findContours(thresh_otsu, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             all_contours.extend(contours_otsu)
             self.get_logger().info(f"Otsu threshold found {len(contours_otsu)} contours")
         except Exception as e:
             self.get_logger().warn(f"Otsu threshold failed: {e}")
-        
+
         # Method 3: Canny edge detection (catches edges/boundaries)
         try:
             edges = cv2.Canny(blurred, 50, 150)
             kernel = np.ones((5, 5), np.uint8)
             edges_dilated = cv2.dilate(edges, kernel, iterations=2)
+            # Remove shadow pixels before contour extraction
+            edges_dilated = cv2.bitwise_and(edges_dilated, edges_dilated, mask=shadow_mask)
             contours_canny, _ = cv2.findContours(edges_dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             all_contours.extend(contours_canny)
             self.get_logger().info(f"Canny edge detection found {len(contours_canny)} contours")
         except Exception as e:
             self.get_logger().warn(f"Canny edge detection failed: {e}")
-        
+
         self.get_logger().info(f"Total contours from all methods: {len(all_contours)}")
-        
+
         # Relaxed filter parameters (was too strict before)
-        min_area = (w * h) * 0.0005  # Reduced from 0.001 (0.05% instead of 0.1%)
-        # FIX: Reduced max_area from 0.9 (90%) to 0.35 (35%) to filter out large regions
-        # like arms/hands that enter the scene during robot movement
+        min_area = (w * h) * 0.0005  # 0.05% of image
         max_area = (w * h) * 0.35    # 35% of image - filters out large objects (arms, hands)
-        min_box_size = 15            # Reduced from 20 to catch smaller objects
-        
+        min_box_size = 15
+
         self.get_logger().info(f"Area filtering: min={min_area:.0f} px, max={max_area:.0f} px ({0.35*100:.0f}% of image)")
-        
+
         detections = []
         seen_boxes = []  # Track similar boxes to avoid duplicates
-        
+
         for i, contour in enumerate(all_contours):
             area = cv2.contourArea(contour)
-            
+
             # Filter by area
             if area < min_area or area > max_area:
                 continue
-            
+
             # Get bounding box
             x, y, w_box, h_box = cv2.boundingRect(contour)
-            
+
             # Filter small boxes
             if w_box < min_box_size or h_box < min_box_size:
                 continue
-            
+
+            # Contour-level shadow rejection (second line of defence)
+            if self._is_shadow_contour(contour, hsv_image, h, w):
+                continue
+
             # Check for duplicate/overlapping detections (IoU > 0.7 with existing)
             bbox_new = [x, y, x + w_box, y + h_box]
             is_duplicate = False
@@ -711,21 +829,21 @@ class SimpleSAMDetector(Node):
                 if iou > 0.7:  # High overlap = duplicate
                     is_duplicate = True
                     break
-            
+
             if is_duplicate:
                 continue
-            
+
             seen_boxes.append(bbox_new)
-            
+
             # Create binary mask for this object
             mask = np.zeros((h, w), dtype=np.uint8)
             cv2.drawContours(mask, [contour], -1, 255, -1)
-            
+
             # Calculate confidence based on contour properties
             perimeter = cv2.arcLength(contour, True)
             circularity = 4 * np.pi * area / (perimeter * perimeter) if perimeter > 0 else 0
             confidence = min(0.95, 0.50 + circularity * 0.45)  # More lenient baseline
-            
+
             # Relaxed confidence threshold (was 0.4, now 0.3)
             if confidence <= 0.3:
                 continue
