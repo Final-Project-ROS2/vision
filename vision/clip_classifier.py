@@ -52,9 +52,12 @@ import cv2
 import numpy as np
 import sys
 import json
+import base64
 from datetime import datetime
 from typing import List, Dict, Tuple, Optional
 import time
+from urllib.request import Request, urlopen
+from urllib.error import URLError, HTTPError
 
 # Import custom interfaces
 try:
@@ -181,6 +184,23 @@ class CLIPClassifier(Node):
         self.latest_found_object = None  # For find_object service visualization
         self.frame_counter = 0
         self.frame_captured = False
+
+        # VLM settings for /vision/find_object via local Ollama.
+        self.declare_parameter('find_object_mode', 'vlm')
+        self.declare_parameter('vlm_model', 'qwen3-vl:8b')
+        self.declare_parameter('ollama_host', 'http://localhost:11434')
+        self.declare_parameter('vlm_timeout_sec', 45.0)
+        self.declare_parameter('vlm_selection_min_confidence', 0.25)
+        self.declare_parameter('vlm_verify_min_confidence', 0.30)
+        self.declare_parameter('find_object_max_regions', 12)
+
+        self.find_object_mode = str(self.get_parameter('find_object_mode').value).lower()
+        self.vlm_model = str(self.get_parameter('vlm_model').value)
+        self.ollama_host = str(self.get_parameter('ollama_host').value).rstrip('/')
+        self.vlm_timeout_sec = float(self.get_parameter('vlm_timeout_sec').value)
+        self.vlm_selection_min_confidence = float(self.get_parameter('vlm_selection_min_confidence').value)
+        self.vlm_verify_min_confidence = float(self.get_parameter('vlm_verify_min_confidence').value)
+        self.find_object_max_regions = int(self.get_parameter('find_object_max_regions').value)
         
         # CLIP model
         self.model = None
@@ -299,6 +319,10 @@ class CLIPClassifier(Node):
         self.get_logger().info(f"Service: /vision/classify_bbox_filtered")
         self.get_logger().info(f"Service: /vision/find_object")
         self.get_logger().info("Service: /vision/find_multi_object")
+        self.get_logger().info(
+            "Find object mode: "
+            f"{self.find_object_mode} (vlm_model={self.vlm_model}, ollama_host={self.ollama_host})"
+        )
         self.get_logger().info(f"Subscriber: /vision/sam_detections (auto-classify on SAM publish)")
         self.get_logger().info(f"OpenCV Window: '{self.window_name}'")
     
@@ -731,6 +755,250 @@ class CLIPClassifier(Node):
 
         return float(similarity)
 
+    @staticmethod
+    def _build_color_palette_bgr() -> List[Tuple[int, int, int]]:
+        """Colorblind-friendly BGR palette used for candidate overlays."""
+        return [
+            (180, 119, 31),   # blue-ish
+            (14, 127, 255),   # orange
+            (44, 160, 44),    # green
+            (189, 103, 148),  # magenta
+            (207, 190, 23),   # cyan-yellow
+            (40, 39, 214),    # red
+            (127, 127, 127),  # gray
+            (194, 119, 227),  # pink
+            (34, 189, 188),   # teal
+            (75, 86, 140),    # brown
+            (189, 188, 34),   # olive
+            (229, 218, 158),  # tan
+        ]
+
+    @staticmethod
+    def _bgr_to_color_name(color: Tuple[int, int, int]) -> str:
+        """Map palette color to a human-readable name for prompt grounding."""
+        mapping = {
+            (180, 119, 31): 'blue',
+            (14, 127, 255): 'orange',
+            (44, 160, 44): 'green',
+            (189, 103, 148): 'magenta',
+            (207, 190, 23): 'cyan',
+            (40, 39, 214): 'red',
+            (127, 127, 127): 'gray',
+            (194, 119, 227): 'pink',
+            (34, 189, 188): 'teal',
+            (75, 86, 140): 'brown',
+            (189, 188, 34): 'olive',
+            (229, 218, 158): 'tan',
+        }
+        return mapping.get(color, 'unknown')
+
+    def _encode_png_base64(self, image_bgr: np.ndarray) -> str:
+        """Encode BGR image to base64 PNG string for Ollama chat API."""
+        success, buffer = cv2.imencode('.png', image_bgr)
+        if not success:
+            raise RuntimeError('Failed to encode image as PNG')
+        return base64.b64encode(buffer.tobytes()).decode('ascii')
+
+    def _ollama_chat(self, messages: List[Dict], timeout_sec: Optional[float] = None) -> str:
+        """Call local Ollama /api/chat endpoint and return message text."""
+        payload = {
+            'model': self.vlm_model,
+            'messages': messages,
+            'stream': False,
+        }
+        req = Request(
+            f"{self.ollama_host}/api/chat",
+            data=json.dumps(payload).encode('utf-8'),
+            headers={'Content-Type': 'application/json'},
+            method='POST',
+        )
+        with urlopen(req, timeout=timeout_sec or self.vlm_timeout_sec) as response:
+            data = json.loads(response.read().decode('utf-8'))
+
+        text = ''
+        if isinstance(data, dict):
+            msg = data.get('message', {})
+            if isinstance(msg, dict):
+                text = msg.get('content', '')
+            if not text:
+                text = data.get('response', '')
+        return str(text).strip()
+
+    def _extract_json_object(self, text: str) -> Dict:
+        """Extract the first JSON object from a model response."""
+        start = text.find('{')
+        end = text.rfind('}')
+        if start == -1 or end == -1 or end <= start:
+            raise ValueError('No JSON object found in VLM response')
+        return json.loads(text[start:end + 1])
+
+    def _build_annotated_candidates(
+        self,
+        frame_bgr: np.ndarray,
+        bboxes: List[List[int]],
+    ) -> Tuple[np.ndarray, Dict[int, Dict]]:
+        """Draw candidate regions with colored boxes and numeric IDs."""
+        palette = self._build_color_palette_bgr()
+        vis = frame_bgr.copy()
+        h, w = vis.shape[:2]
+        candidates: Dict[int, Dict] = {}
+
+        for idx, bbox in enumerate(bboxes[:max(1, self.find_object_max_regions)], start=1):
+            x1, y1, x2, y2 = [int(v) for v in bbox]
+            x1 = max(0, min(x1, w))
+            x2 = max(0, min(x2, w))
+            y1 = max(0, min(y1, h))
+            y2 = max(0, min(y2, h))
+            if x2 <= x1 or y2 <= y1:
+                continue
+
+            color = palette[(idx - 1) % len(palette)]
+            color_name = self._bgr_to_color_name(color)
+            cv2.rectangle(vis, (x1, y1), (x2, y2), color, 3)
+
+            label = f"ID {idx} | {color_name}"
+            label_size, _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.65, 2)
+            y_label = max(25, y1 - 8)
+            cv2.rectangle(
+                vis,
+                (x1, y_label - label_size[1] - 8),
+                (x1 + label_size[0] + 10, y_label + 4),
+                color,
+                -1,
+            )
+            cv2.putText(
+                vis,
+                label,
+                (x1 + 4, y_label),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.65,
+                (0, 0, 0),
+                2,
+            )
+
+            candidates[idx] = {
+                'bbox': [x1, y1, x2, y2],
+                'color_name': color_name,
+            }
+
+        return vis, candidates
+
+    def _query_vlm_select(self, annotated_bgr: np.ndarray, target_label: str, valid_ids: List[int]) -> Dict:
+        """Ask VLM to select best candidate ID for the target label."""
+        image_b64 = self._encode_png_base64(annotated_bgr)
+        valid_ids_str = ', '.join(str(i) for i in valid_ids)
+        messages = [
+            {
+                'role': 'system',
+                'content': (
+                    'You are a visual grounding assistant. '
+                    'Select candidate IDs from the provided image and output strict JSON only.'
+                ),
+            },
+            {
+                'role': 'user',
+                'content': (
+                    f"Target object label: {target_label}. "
+                    f"Choose exactly one ID from [{valid_ids_str}] or null if absent. "
+                    'Use only visible evidence. '
+                    'Return only JSON with keys: '
+                    '{"selected_id": <int|null>, "confidence": <0..1>, '
+                    '"short_reason": "<max 20 words>", "alternate_ids": [<int>, ...]}.'
+                ),
+                'images': [image_b64],
+            },
+        ]
+
+        raw = self._ollama_chat(messages)
+        parsed = self._extract_json_object(raw)
+        selected = parsed.get('selected_id')
+        confidence = float(parsed.get('confidence', 0.0))
+        alternates = parsed.get('alternate_ids', [])
+        if selected is not None:
+            selected = int(selected)
+        alternates = [int(v) for v in alternates if int(v) in valid_ids]
+        return {
+            'selected_id': selected,
+            'confidence': confidence,
+            'short_reason': str(parsed.get('short_reason', '')).strip(),
+            'alternate_ids': alternates,
+            'raw': raw,
+        }
+
+    def _query_vlm_verify_crop(self, crop_bgr: np.ndarray, target_label: str) -> Dict:
+        """Second-pass verification on selected crop to reduce hallucinations."""
+        image_b64 = self._encode_png_base64(crop_bgr)
+        messages = [
+            {
+                'role': 'system',
+                'content': (
+                    'You verify whether an image crop contains the requested object. '
+                    'Reply in strict JSON only.'
+                ),
+            },
+            {
+                'role': 'user',
+                'content': (
+                    f"Does this crop contain '{target_label}'? "
+                    'Return only JSON: '
+                    '{"is_match": <true|false>, "confidence": <0..1>, "reason": "<max 20 words>"}.'
+                ),
+                'images': [image_b64],
+            },
+        ]
+        raw = self._ollama_chat(messages)
+        parsed = self._extract_json_object(raw)
+        return {
+            'is_match': bool(parsed.get('is_match', False)),
+            'confidence': float(parsed.get('confidence', 0.0)),
+            'reason': str(parsed.get('reason', '')).strip(),
+            'raw': raw,
+        }
+
+    def _find_object_clip_fallback(self, target_label: str) -> Tuple[Optional[Dict], str]:
+        """Find object via CLIP similarity over detected regions as fallback path."""
+        if not CLIP_AVAILABLE or self.model is None:
+            return None, 'CLIP model not available for fallback'
+
+        bboxes, error_message = self._call_detect_objects()
+        if error_message:
+            return None, error_message
+        if not bboxes:
+            return None, 'No objects detected in current frame'
+
+        frame = self.captured_frame
+        if frame is None:
+            return None, f'No frame captured yet from {self.rgb_topic}'
+        h, w = frame.shape[:2]
+
+        best_match = None
+        best_similarity = -1.0
+        for region_id, bbox in enumerate(bboxes):
+            x1, y1, x2, y2 = bbox
+            x1 = max(0, min(x1, w))
+            x2 = max(0, min(x2, w))
+            y1 = max(0, min(y1, h))
+            y2 = max(0, min(y2, h))
+            if x2 <= x1 or y2 <= y1:
+                continue
+            similarity = self._compute_similarity(frame[y1:y2, x1:x2], target_label)
+            if similarity > best_similarity:
+                best_similarity = similarity
+                best_match = {
+                    'bbox': [x1, y1, x2, y2],
+                    'confidence': float(similarity),
+                    'region_id': region_id,
+                }
+
+        if best_match is None:
+            return None, f"No valid regions found to compare with '{target_label}'"
+        if best_match['confidence'] < 0.2:
+            return None, (
+                f"Label '{target_label}' found but similarity too low "
+                f"({best_match['confidence']:.3f} < 0.2)"
+            )
+        return best_match, ''
+
     def find_multi_object_callback(self, request, response):
         """
         Service callback for /vision/find_multi_object.
@@ -876,14 +1144,14 @@ class CLIPClassifier(Node):
     
     def find_object_callback(self, request, response):
         """
-        Service callback for /vision/find_object - find bounding box by label using CLIP embeddings
-        
-        This service:
-        1. Takes a label name as input (can be ANY text, not limited to candidate_labels)
-        2. Gets text embedding for the label using CLIP
-        3. Gets image embeddings for all SAM bounding boxes
-        4. Computes cosine similarity between label and each bbox
-        5. Returns the bounding box with highest similarity score
+        Service callback for /vision/find_object.
+
+        Default flow uses a VLM via local Ollama:
+        1) detect object candidates with SAM/detect_objects,
+        2) annotate frame with colored boxes and numeric IDs,
+        3) ask VLM to choose the best ID for target label,
+        4) verify selected crop with a second VLM pass,
+        5) fallback to CLIP similarity if configured and needed.
         
         Custom Interface Definition (add to custom_interfaces/srv/FindObject.srv):
         # Request
@@ -897,14 +1165,14 @@ class CLIPClassifier(Node):
         """
         try:
             target_label = request.label.strip()
-            
+
             if not target_label:
                 response.success = False
                 response.message = "Empty label provided"
                 response.bbox = []
                 response.confidence = 0.0
                 return response
-            
+
             if self.captured_frame is None:
                 response.success = False
                 response.message = f"No frame captured yet from {self.rgb_topic}"
@@ -912,183 +1180,130 @@ class CLIPClassifier(Node):
                 response.confidence = 0.0
                 self.get_logger().warn("No captured frame available")
                 return response
-            
-            if not CLIP_AVAILABLE or self.model is None:
+            frame = self.captured_frame.copy()
+            bboxes, detect_error = self._call_detect_objects()
+            if detect_error:
                 response.success = False
-                response.message = "CLIP model not available"
+                response.message = detect_error
                 response.bbox = []
                 response.confidence = 0.0
-                self.get_logger().error("CLIP model not available")
                 return response
-            
-            # FIX: Clear cached classifications to force fresh detection every time
-            # This ensures find -> move -> find gets updated scene data
-            self.get_logger().info("Clearing cached region classifications to force fresh detection")
-            self.latest_region_classifications = []
-            
-            # Check if we have classified regions from SAM, if not, get detections
-            if not self.latest_region_classifications:
-                self.get_logger().info("No SAM detections available. Calling /vision/detect_objects automatically...")
-                
-                # Create a client to call the detect_objects service
+            if not bboxes:
+                response.success = False
+                response.message = 'No objects detected in current frame'
+                response.bbox = []
+                response.confidence = 0.0
+                return response
+
+            # VLM-first route unless mode is explicitly clip.
+            use_vlm = self.find_object_mode in ('vlm', 'hybrid')
+            if use_vlm:
                 try:
-                    from custom_interfaces.srv import DetectObjects
-                except ImportError:
-                    response.success = False
-                    response.message = "DetectObjects service interface not available"
-                    response.bbox = []
-                    response.confidence = 0.0
-                    self.get_logger().error("DetectObjects interface not found")
-                    return response
-                
-                detect_client = self.create_client(
-                    DetectObjects, 
-                    '/vision/detect_objects',
-                    callback_group=self.callback_group
-                )
-                
-                # Wait for service to be available (timeout 5 seconds)
-                if not detect_client.wait_for_service(timeout_sec=5.0):
-                    response.success = False
-                    response.message = "Detection service '/vision/detect_objects' not available"
-                    response.bbox = []
-                    response.confidence = 0.0
-                    self.get_logger().error("Detection service not available")
-                    return response
-                
-                # Call the detection service synchronously
-                detect_request = DetectObjects.Request()
-                detect_response = detect_client.call(detect_request)
-                if not detect_response.success:
-                    response.success = False
-                    response.message = f"Object detection failed: {detect_response.error_message}"
-                    response.bbox = []
-                    response.confidence = 0.0
-                    self.get_logger().error(f"Detection failed: {detect_response.error_message}")
-                    return response
-                
-                self.get_logger().info(f"Detection completed: {detect_response.total_detections} objects found")
-                
-                # Build bounding boxes from detection response
-                bboxes = []
-                for i in range(detect_response.total_detections):
-                    bbox = [
-                        detect_response.bbox_x1[i],
-                        detect_response.bbox_y1[i],
-                        detect_response.bbox_x2[i],
-                        detect_response.bbox_y2[i]
+                    annotated, candidates = self._build_annotated_candidates(frame, bboxes)
+                    valid_ids = sorted(list(candidates.keys()))
+                    if not valid_ids:
+                        raise RuntimeError('No valid candidate boxes after bounds filtering')
+
+                    select_result = self._query_vlm_select(annotated, target_label, valid_ids)
+                    selected_id = select_result['selected_id']
+                    selection_conf = float(select_result['confidence'])
+
+                    if selected_id is None or selected_id not in candidates:
+                        raise RuntimeError('VLM did not select a valid candidate ID')
+                    if selection_conf < self.vlm_selection_min_confidence:
+                        raise RuntimeError(
+                            f"VLM selection confidence too low ({selection_conf:.3f} < {self.vlm_selection_min_confidence:.3f})"
+                        )
+
+                    ordered_ids = [selected_id] + [
+                        alt_id for alt_id in select_result['alternate_ids'] if alt_id != selected_id
                     ]
-                    bboxes.append(bbox)
-                
-                if not bboxes:
+
+                    found = None
+                    for candidate_id in ordered_ids:
+                        candidate = candidates.get(candidate_id)
+                        if candidate is None:
+                            continue
+                        x1, y1, x2, y2 = candidate['bbox']
+                        crop = frame[y1:y2, x1:x2]
+                        verify_result = self._query_vlm_verify_crop(crop, target_label)
+                        if verify_result['is_match'] and verify_result['confidence'] >= self.vlm_verify_min_confidence:
+                            found = {
+                                'bbox': candidate['bbox'],
+                                'confidence': float(verify_result['confidence']),
+                                'region_id': int(candidate_id),
+                                'mode': 'vlm',
+                                'reason': select_result['short_reason'] or verify_result['reason'],
+                            }
+                            break
+
+                    if found is None:
+                        raise RuntimeError('VLM verification rejected all selected candidates')
+
+                    self.latest_found_object = {
+                        'label': target_label,
+                        'bbox': found['bbox'],
+                        'confidence': found['confidence'],
+                        'region_id': found['region_id'],
+                    }
+
+                    response.success = True
+                    response.message = (
+                        f"Found '{target_label}' via VLM at candidate ID {found['region_id']} "
+                        f"(confidence {found['confidence']:.3f})."
+                    )
+                    response.bbox = found['bbox']
+                    response.confidence = float(found['confidence'])
+                    self.get_logger().info(
+                        f"VLM find_object success for '{target_label}': bbox={found['bbox']}, "
+                        f"confidence={found['confidence']:.3f}, id={found['region_id']}"
+                    )
+                    return response
+
+                except (HTTPError, URLError, TimeoutError, ValueError, RuntimeError) as vlm_error:
+                    self.get_logger().warn(f"VLM find_object path failed: {vlm_error}")
+                    if self.find_object_mode == 'vlm':
+                        response.success = False
+                        response.message = f"VLM find_object failed: {vlm_error}"
+                        response.bbox = []
+                        response.confidence = 0.0
+                        self.latest_found_object = None
+                        return response
+
+            if self.find_object_mode in ('clip', 'hybrid'):
+                best_match, clip_error = self._find_object_clip_fallback(target_label)
+                if best_match is None:
                     response.success = False
-                    response.message = "No objects detected in current frame"
+                    response.message = f"CLIP fallback failed: {clip_error}"
                     response.bbox = []
                     response.confidence = 0.0
-                    self.get_logger().warn("No detections found")
+                    self.latest_found_object = None
                     return response
-                
-                # Classify all detected regions using CLIP
-                self.get_logger().info(f"Classifying {len(bboxes)} detected regions...")
-                classification_data = self._classify_regions(self.captured_frame, bboxes)
-                self.latest_region_classifications = classification_data['output']['classified_regions']
-                self.latest_classification = None
-                
-                self.get_logger().info(f"Classification complete for {len(self.latest_region_classifications)} regions")
-            
-            self.get_logger().info(f"Computing CLIP embeddings for '{target_label}' and {len(self.latest_region_classifications)} regions")
-            
-            # Compute image-text similarity for each bounding box using CLIP's high-level API
-            best_match = None
-            best_similarity = -1.0  # Cosine similarity ranges from -1 to 1
-            
-            for region in self.latest_region_classifications:
-                bbox = region['bbox']
-                x1, y1, x2, y2 = bbox
-                
-                # Clamp bbox to image bounds
-                h, w = self.captured_frame.shape[:2]
-                x1 = max(0, min(x1, w))
-                x2 = max(0, min(x2, w))
-                y1 = max(0, min(y1, h))
-                y2 = max(0, min(y2, h))
-                
-                # Skip invalid boxes
-                if x2 <= x1 or y2 <= y1:
-                    self.get_logger().warn(f"Skipping invalid bbox: {bbox}")
-                    continue
-                
-                # Crop and convert region
-                region_bgr = self.captured_frame[y1:y2, x1:x2]
-                region_rgb = cv2.cvtColor(region_bgr, cv2.COLOR_BGR2RGB)
-                pil_image = PILImage.fromarray(region_rgb)
-                
-                # Use OpenAI CLIP for similarity computation
-                image_input = self.preprocess(pil_image).unsqueeze(0).to(self.device)
-                text_tokens = clip.tokenize([target_label]).to(self.device)
-                
-                with torch.no_grad():
-                    image_features = self.model.encode_image(image_input)
-                    text_features = self.model.encode_text(text_tokens)
-                    
-                    # Normalize features
-                    image_features = image_features / image_features.norm(dim=-1, keepdim=True)
-                    text_features = text_features / text_features.norm(dim=-1, keepdim=True)
-                    
-                    # Compute cosine similarity (normalized dot product)
-                    similarity = (image_features @ text_features.T)[0, 0].item()
-                
-                self.get_logger().debug(f"Region {region['region_id']}: similarity = {similarity:.4f}")
-                
-                # Track best match
-                if similarity > best_similarity:
-                    best_similarity = similarity
-                    best_match = {
-                        'bbox': bbox,
-                        'confidence': similarity,
-                        'region_id': region['region_id']
-                    }
-            
-            # Check if any match was found
-            if best_match is None:
-                response.success = False
-                response.message = f"No valid regions found to compare with '{target_label}'"
-                response.bbox = []
-                response.confidence = 0.0
-                self.latest_found_object = None
-                self.get_logger().info(f"No valid regions to compare")
-                return response
-            
-            # Optional: Set a minimum similarity threshold
-            min_similarity_threshold = 0.2  # Adjust based on your needs
-            if best_match['confidence'] < min_similarity_threshold:
-                response.success = False
-                response.message = f"Label '{target_label}' found but similarity too low ({best_match['confidence']:.3f} < {min_similarity_threshold})"
-                response.bbox = []
+
+                self.latest_found_object = {
+                    'label': target_label,
+                    'bbox': best_match['bbox'],
+                    'confidence': best_match['confidence'],
+                    'region_id': best_match['region_id'],
+                }
+                response.success = True
+                response.message = (
+                    f"Found '{target_label}' via CLIP fallback "
+                    f"(similarity {best_match['confidence']:.3f})."
+                )
+                response.bbox = best_match['bbox']
                 response.confidence = float(best_match['confidence'])
-                self.latest_found_object = None
-                self.get_logger().info(f"Label '{target_label}' similarity too low: {best_match['confidence']:.3f}")
+                self.get_logger().info(
+                    f"CLIP fallback find_object success for '{target_label}': bbox={best_match['bbox']}, "
+                    f"similarity={best_match['confidence']:.3f}, region_id={best_match['region_id']}"
+                )
                 return response
-            
-            # Store for visualization
-            self.latest_found_object = {
-                'label': target_label,
-                'bbox': best_match['bbox'],
-                'confidence': best_match['confidence'],
-                'region_id': best_match['region_id']
-            }
-            
-            # Return success with bbox
-            response.success = True
-            response.message = f"Found '{target_label}' with similarity {best_match['confidence']:.3f}"
-            response.bbox = best_match['bbox']
-            response.confidence = float(best_match['confidence'])
-            # Note: FindObject.srv doesn't have object_id field (only FindObjectReal.srv does)
-            
-            self.get_logger().info(
-                f"Found '{target_label}': bbox={best_match['bbox']}, "
-                f"similarity={best_match['confidence']:.3f}, region_id={best_match['region_id']}"
-            )
+
+            response.success = False
+            response.message = f"Unsupported find_object_mode: {self.find_object_mode}"
+            response.bbox = []
+            response.confidence = 0.0
+            self.latest_found_object = None
             
         except Exception as e:
             response.success = False
