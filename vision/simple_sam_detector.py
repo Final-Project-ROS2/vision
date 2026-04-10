@@ -29,7 +29,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy
 from custom_interfaces.msg import SAMDetections, SAMDetection
-from custom_interfaces.srv import DetectObjects
+from custom_interfaces.srv import DetectObjects, FindObjectAngle, PixelToReal
 from sensor_msgs.msg import Image
 from std_srvs.srv import Trigger
 from std_msgs.msg import Header
@@ -165,7 +165,25 @@ class SimpleSAMDetector(Node):
             Trigger,
             '/vision/classify_bbox_filtered'
         )
-        
+
+        # Service client for GraspNet detection
+        self.grasp_client = self.create_client(
+            Trigger,
+            '/vision/detect_grasp'
+        )
+
+        # Service client for OBB angle detection
+        self.obb_client = self.create_client(
+            FindObjectAngle,
+            '/obb/find_object_angle'
+        )
+
+        # Service client for pixel-to-real conversion
+        self.pixel_to_real_client = self.create_client(
+            PixelToReal,
+            '/pixel_to_real'
+        )
+
         # OpenCV window setup
         self.window_name = f"SAM Object Detection - {self.rgb_topic}"
         cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL)
@@ -240,11 +258,13 @@ class SimpleSAMDetector(Node):
             self.get_logger().error(f"Failed to convert depth image: {e}")
     
     def run_pipeline_callback(self, request, response):
-        """Service callback for /vision/run_pipeline - triggers detection and publishes to topic"""
+        """Service callback for /vision/run_pipeline - runs SAM+CLIP+GraspNet+OBB+Pixel-to-Real"""
+        import time
+        pipeline_start = time.perf_counter()
+
         try:
-            # Use captured frame instead of latest_rgb for consistency
             frame_to_use = self.captured_frame if self.frame_captured else self.latest_rgb
-            
+
             if frame_to_use is None:
                 response.success = False
                 response.message = json.dumps({
@@ -254,53 +274,207 @@ class SimpleSAMDetector(Node):
                 }, indent=2)
                 self.get_logger().warn("No image received yet")
                 return response
-            
+
             self.get_logger().info("=" * 80)
-            self.get_logger().info("Running SAM detection on captured frame...")
-            self.get_logger().info(f"Frame shape: {frame_to_use.shape}")
+            self.get_logger().info("Running full pipeline: SAM + CLIP + GraspNet + OBB + Pixel-to-Real")
             self.get_logger().info("=" * 80)
-            
-            # Run detection on captured frame (with IoU tracking from previous frame)
+
+            # ── Step 1: SAM detection ──────────────────────────────────────────
+            sam_start = time.perf_counter()
             self.latest_detections = self._detect_objects(frame_to_use)
-            
-            # Store current detections as previous for next frame IoU calculation
             self.previous_detections = self.latest_detections.copy()
-            
-            # Build JSON response in the requested schema
-            detection_data = self._build_detection_schema()
-            
-            # Publish detections as ROS2 message
             self._publish_detections_ros()
-            
-            response.success = True
-            response.message = json.dumps(detection_data, indent=2)
-            
-            self.get_logger().info("=" * 80)
-            self.get_logger().info(f"Detection complete: {len(self.latest_detections)} objects found")
-            self.get_logger().info("=" * 80)
-            
-            # Print JSON output with bounding boxes
-            self.get_logger().info("JSON OUTPUT (with bounding boxes):")
-            self.get_logger().info("=" * 80)
-            self.get_logger().info(response.message)
-            self.get_logger().info("=" * 80)
-            
-            # Print detection details in readable format
-            self.get_logger().info("Bounding Boxes Summary:")
-            for i, det in enumerate(self.latest_detections):
+            sam_latency = time.perf_counter() - sam_start
+            self.get_logger().info(f"[1/5] SAM: {len(self.latest_detections)} objects in {sam_latency:.3f}s")
+
+            # ── Step 2: CLIP classification ────────────────────────────────────
+            time.sleep(0.3)  # allow CLIP to process published detections
+            clip_start = time.perf_counter()
+            clip_classifications = {}
+            clip_success = False
+            if self.clip_filter_client.wait_for_service(timeout_sec=2.0):
+                try:
+                    fut = self.clip_filter_client.call_async(Trigger.Request())
+                    rclpy.spin_until_future_complete(self, fut, timeout_sec=5.0)
+                    clip_resp = fut.result()
+                    if clip_resp and clip_resp.success:
+                        clip_json = json.loads(clip_resp.message)
+                        for region in clip_json.get('regions', []):
+                            rid = region.get('region_id')
+                            clip_classifications[rid] = {
+                                'label':      region.get('label'),
+                                'confidence': float(region.get('confidence', 0.0)),
+                            }
+                        clip_success = True
+                except Exception as e:
+                    self.get_logger().warn(f"CLIP call failed: {e}")
+            clip_latency = time.perf_counter() - clip_start
+            self.get_logger().info(f"[2/5] CLIP: {len(clip_classifications)} labelled in {clip_latency:.3f}s")
+
+            # ── Step 3: GraspNet detection ─────────────────────────────────────
+            grasp_start = time.perf_counter()
+            grasp_map = {}
+            grasp_success = False
+            if self.grasp_client.wait_for_service(timeout_sec=2.0):
+                try:
+                    fut = self.grasp_client.call_async(Trigger.Request())
+                    rclpy.spin_until_future_complete(self, fut, timeout_sec=10.0)
+                    grasp_resp = fut.result()
+                    if grasp_resp and grasp_resp.success:
+                        grasp_json = json.loads(grasp_resp.message)
+                        for g in grasp_json.get('grasps', []):
+                            obj_id_str = g.get('object_id', '')
+                            try:
+                                oid = int(obj_id_str.split('_')[1]) if '_' in obj_id_str else int(obj_id_str)
+                            except (ValueError, IndexError):
+                                continue
+                            if oid in grasp_map:
+                                continue
+                            pix = g.get('pixel_location', [0, 0])
+                            pos = g.get('position', {})
+                            grasp_map[oid] = {
+                                'pixel':             {'u': int(pix[0]) if len(pix) > 0 else 0,
+                                                      'v': int(pix[1]) if len(pix) > 1 else 0},
+                                'world':             {'x': float(pos.get('x', 0.0)),
+                                                      'y': float(pos.get('y', 0.0)),
+                                                      'z': float(pos.get('z', 0.0))},
+                                'quality_score':     float(g.get('quality_score', 0.0)),
+                                'grasp_width':       float(g.get('grasp_width', 0.0)),
+                                'approach_direction': g.get('approach_direction', ''),
+                            }
+                        grasp_success = True
+                except Exception as e:
+                    self.get_logger().warn(f"GraspNet call failed: {e}")
+            grasp_latency = time.perf_counter() - grasp_start
+            self.get_logger().info(f"[3/5] GraspNet: {len(grasp_map)} grasps in {grasp_latency:.3f}s")
+
+            # ── Step 4: OBB angle detection ────────────────────────────────────
+            obb_start = time.perf_counter()
+            obb_map = {}
+            obb_success = False
+            if self.obb_client.wait_for_service(timeout_sec=2.0):
+                try:
+                    fut = self.obb_client.call_async(FindObjectAngle.Request())
+                    rclpy.spin_until_future_complete(self, fut, timeout_sec=5.0)
+                    obb_resp = fut.result()
+                    if obb_resp and obb_resp.success:
+                        n_obb = obb_resp.total_objects
+                        bboxes_flat = list(obb_resp.bboxes)
+                        for i in range(n_obb):
+                            bx1 = bboxes_flat[i * 4]     if len(bboxes_flat) > i * 4     else 0
+                            by1 = bboxes_flat[i * 4 + 1] if len(bboxes_flat) > i * 4 + 1 else 0
+                            bx2 = bboxes_flat[i * 4 + 2] if len(bboxes_flat) > i * 4 + 2 else 0
+                            by2 = bboxes_flat[i * 4 + 3] if len(bboxes_flat) > i * 4 + 3 else 0
+                            theta = float(obb_resp.thetas[i]) if i < len(obb_resp.thetas) else 0.0
+                            obb_entry = {
+                                'theta_rad':  theta,
+                                'angle_deg':  float(theta * 180.0 / 3.141592653589793),
+                                'width_px':   float(obb_resp.widths[i])    if i < len(obb_resp.widths)    else 0.0,
+                                'height_px':  float(obb_resp.heights[i])   if i < len(obb_resp.heights)   else 0.0,
+                                'center_u':   float(obb_resp.centers_u[i]) if i < len(obb_resp.centers_u) else 0.0,
+                                'center_v':   float(obb_resp.centers_v[i]) if i < len(obb_resp.centers_v) else 0.0,
+                            }
+                            # Match OBB result to SAM detection by IoU
+                            obb_bbox = [bx1, by1, bx2, by2]
+                            best_iou, best_idx = 0.0, i
+                            for sam_idx, det in enumerate(self.latest_detections):
+                                iou = self._calculate_iou(obb_bbox, det['bbox'])
+                                if iou > best_iou:
+                                    best_iou, best_idx = iou, sam_idx
+                            obb_map[best_idx] = obb_entry
+                        obb_success = True
+                except Exception as e:
+                    self.get_logger().warn(f"OBB call failed: {e}")
+            obb_latency = time.perf_counter() - obb_start
+            self.get_logger().info(f"[4/5] OBB: {len(obb_map)} objects in {obb_latency:.3f}s")
+
+            # ── Step 5: Pixel-to-Real for each detected object center ──────────
+            p2r_start = time.perf_counter()
+            p2r_map = {}
+            p2r_success = False
+            if self.pixel_to_real_client.wait_for_service(timeout_sec=2.0):
+                p2r_success = True
+                for idx, det in enumerate(self.latest_detections):
+                    cx, cy = det['center']
+                    try:
+                        req = PixelToReal.Request()
+                        req.u = int(cx)
+                        req.v = int(cy)
+                        fut = self.pixel_to_real_client.call_async(req)
+                        rclpy.spin_until_future_complete(self, fut, timeout_sec=2.0)
+                        p2r_resp = fut.result()
+                        if p2r_resp:
+                            p2r_map[idx] = {
+                                'u': int(cx), 'v': int(cy),
+                                'x': float(p2r_resp.x),
+                                'y': float(p2r_resp.y),
+                                'z': float(p2r_resp.z),
+                            }
+                    except Exception as e:
+                        self.get_logger().warn(f"Pixel-to-real idx={idx} failed: {e}")
+            p2r_latency = time.perf_counter() - p2r_start
+            self.get_logger().info(f"[5/5] Pixel-to-Real: {len(p2r_map)} objects in {p2r_latency:.3f}s")
+
+            # ── Build unified JSON response ────────────────────────────────────
+            total_latency = time.perf_counter() - pipeline_start
+            objects_out = []
+            for idx, det in enumerate(self.latest_detections):
+                clip_info  = clip_classifications.get(idx, {})
+                grasp_info = grasp_map.get(idx, {})
+                obb_info   = obb_map.get(idx, {})
+                p2r_info   = p2r_map.get(idx, {})
                 bbox = det['bbox']
-                distance = det.get('distance_cm', 'N/A')
-                self.get_logger().info(
-                    f"   [{i}] {det['class_name']}: bbox={bbox}, "
-                    f"confidence={det['confidence']:.2f}, distance={distance}"
-                )
+                objects_out.append({
+                    'object_id':       det['id'],
+                    'label':           clip_info.get('label', '') if clip_info else '',
+                    'bbox':            {'x1': bbox[0], 'y1': bbox[1], 'x2': bbox[2], 'y2': bbox[3]},
+                    'center':          {'u': det['center'][0], 'v': det['center'][1]},
+                    'sam_confidence':  round(float(det['confidence']), 4),
+                    'clip_confidence': round(float(clip_info.get('confidence', 0.0)), 4) if clip_info else '',
+                    'iou_score':       round(float(det.get('iou_score', 0.0)), 4),
+                    'is_stable':       bool(det.get('is_stable', False)),
+                    'distance_cm':     float(det['distance_cm']) if det.get('distance_cm') is not None else '',
+                    'world':           p2r_info if p2r_info else {},
+                    'has_grasp':       bool(grasp_info),
+                    'grasp':           grasp_info if grasp_info else {},
+                    'obb': {
+                        'angle_deg': round(obb_info['angle_deg'], 2),
+                        'theta_rad': round(obb_info['theta_rad'], 4),
+                        'width_px':  round(obb_info['width_px'], 1),
+                        'height_px': round(obb_info['height_px'], 1),
+                        'center_u':  round(obb_info['center_u'], 1),
+                        'center_v':  round(obb_info['center_v'], 1),
+                    } if obb_info else {},
+                })
+
+            pipeline_result = {
+                'pipeline':      'run_pipeline',
+                'timestamp':     datetime.utcnow().isoformat() + 'Z',
+                'total_objects': len(objects_out),
+                'latency_s':     round(total_latency, 3),
+                'services': {
+                    'sam':           {'success': True,          'latency_s': round(sam_latency, 3),   'total_detections': len(self.latest_detections)},
+                    'clip':          {'success': clip_success,   'latency_s': round(clip_latency, 3),  'filtered_regions': len(clip_classifications)},
+                    'graspnet':      {'success': grasp_success,  'latency_s': round(grasp_latency, 3), 'total_grasps': len(grasp_map)},
+                    'obb':           {'success': obb_success,    'latency_s': round(obb_latency, 3),   'total_objects': len(obb_map)},
+                    'pixel_to_real': {'success': p2r_success,   'latency_s': round(p2r_latency, 3),   'total_converted': len(p2r_map)},
+                },
+                'objects': objects_out,
+            }
+
+            # Save to vision_runs_history.json (dashboard reads this)
+            self._save_run_pipeline_result(
+                pipeline_result, clip_classifications, grasp_map, obb_map, p2r_map,
+                sam_latency, clip_latency, grasp_latency, obb_latency
+            )
+
+            response.success = True
+            response.message = json.dumps(pipeline_result, indent=2)
+
             self.get_logger().info("=" * 80)
-            
-            # Verify bounding boxes are in output
-            bbox_count = len([d for d in detection_data.get('detections', [{}])[0].get('detections', []) if 'bbox' in d])
-            self.get_logger().info(f"Verified: {bbox_count} bounding boxes included in JSON output")
+            self.get_logger().info(f"Full pipeline done: {len(objects_out)} objects, {total_latency:.2f}s total")
             self.get_logger().info("=" * 80)
-            
+
         except Exception as e:
             response.success = False
             response.message = json.dumps({
@@ -308,11 +482,118 @@ class SimpleSAMDetector(Node):
                 "error": str(e),
                 "timestamp": datetime.utcnow().isoformat() + "Z"
             }, indent=2)
-            self.get_logger().error(f"Detection error: {e}")
+            self.get_logger().error(f"Pipeline error: {e}")
             import traceback
             self.get_logger().error(traceback.format_exc())
-        
+
         return response
+
+    def _save_run_pipeline_result(self, pipeline_result, clip_classifications, grasp_map, obb_map, p2r_map,
+                                   sam_latency, clip_latency, grasp_latency, obb_latency):
+        """Save /vision/run_pipeline results to vision_runs_history.json for the dashboard."""
+        try:
+            from pathlib import Path
+            package_path = Path(__file__).parent.parent
+            history_file = package_path / 'vision_runs_history.json'
+
+            history = []
+            if history_file.exists():
+                try:
+                    with open(history_file, 'r') as f:
+                        data = json.load(f)
+                    if isinstance(data, list):
+                        history = data
+                except Exception:
+                    pass
+
+            last_run_no = history[-1]['meta']['run_no'] if history else 0
+            run_no = last_run_no + 1
+
+            num_dets = len(self.latest_detections)
+            iou_scores = [float(d.get('iou_score', 0.0)) for d in self.latest_detections]
+            is_stable_array = [bool(d.get('is_stable', False)) for d in self.latest_detections]
+            avg_sam_conf = (sum(float(d.get('confidence', 0.0)) for d in self.latest_detections) / num_dets
+                            if num_dets > 0 else 0.0)
+            avg_iou = sum(iou_scores) / len(iou_scores) if iou_scores else 0.0
+            stability_rate = (sum(1 for s in is_stable_array if s) / len(is_stable_array)
+                              if is_stable_array else 0.0)
+
+            objects = []
+            for idx, det in enumerate(self.latest_detections):
+                clip_info  = clip_classifications.get(idx, {})
+                grasp_info = grasp_map.get(idx, {})
+                obb_info   = obb_map.get(idx, {})
+                p2r_info   = p2r_map.get(idx, {})
+                bbox = det['bbox']
+                objects.append({
+                    'object_id':       det['id'],
+                    'label':           clip_info.get('label', '') if clip_info else '',
+                    'bbox_x1':         bbox[0],
+                    'bbox_y1':         bbox[1],
+                    'bbox_x2':         bbox[2],
+                    'bbox_y2':         bbox[3],
+                    'sam_confidence':  round(float(det.get('confidence', 0.0)), 4),
+                    'clip_confidence': round(float(clip_info.get('confidence', 0.0)), 4) if clip_info else '',
+                    'distance_cm':     float(det['distance_cm']) if det.get('distance_cm') is not None else '',
+                    'iou_score':       iou_scores[idx],
+                    'is_stable':       is_stable_array[idx],
+                    'has_grasp':       bool(grasp_info),
+                    'grasp':           grasp_info if grasp_info else {},
+                    'world':           p2r_info if p2r_info else {},
+                    'obb_angle_deg':   round(obb_info['angle_deg'], 2) if obb_info else '',
+                    'obb_theta_rad':   round(obb_info['theta_rad'], 4) if obb_info else '',
+                    'obb_width_px':    round(obb_info['width_px'], 1)  if obb_info else '',
+                    'obb_height_px':   round(obb_info['height_px'], 1) if obb_info else '',
+                    'obb_center_u':    round(obb_info['center_u'], 1)  if obb_info else '',
+                    'obb_center_v':    round(obb_info['center_v'], 1)  if obb_info else '',
+                })
+
+            run = {
+                'meta': {
+                    'run_no':    run_no,
+                    'timestamp': datetime.utcnow().isoformat() + 'Z',
+                    'latency_s': pipeline_result['latency_s'],
+                    'source':    'run_pipeline',
+                },
+                'sam': {
+                    'success':          True,
+                    'latency_s':        round(sam_latency, 3),
+                    'total_detections': num_dets,
+                    'avg_confidence':   round(avg_sam_conf, 4),
+                    'average_iou':      round(avg_iou, 4),
+                    'stability_rate':   round(stability_rate, 4),
+                },
+                'clip': {
+                    'success':          bool(clip_classifications),
+                    'latency_s':        round(clip_latency, 3),
+                    'filtered_regions': len(clip_classifications),
+                },
+                'scene':    {'success': False, 'latency_s': 0.0},
+                'obb': {
+                    'success':       bool(obb_map),
+                    'latency_s':     round(obb_latency, 3),
+                    'total_objects': len(obb_map),
+                },
+                'graspnet': {
+                    'success':      bool(grasp_map),
+                    'latency_s':    round(grasp_latency, 3),
+                    'total_grasps': len(grasp_map),
+                },
+                'objects':   objects,
+                'relations': [],
+                'grasps':    list(grasp_map.values()),
+            }
+
+            history.append(run)
+            history = history[-50:]  # keep last 50 runs
+
+            with open(history_file, 'w') as f:
+                json.dump(history, f, indent=2)
+
+            self.get_logger().info(f"Saved run #{run_no} to {history_file} ({num_dets} objects)")
+
+        except Exception as e:
+            self.get_logger().warn(f"Failed to save run pipeline history: {e}")
 
     def detect_objects_callback(self, request, response):
         """Service callback for /vision/detect_objects - returns detection results directly"""
@@ -604,7 +885,7 @@ class SimpleSAMDetector(Node):
             }
 
             history.append(run)
-            history = history[-20:]  # keep last 20 runs
+            history = history[-50:]  # keep last 50 runs
 
             with open(history_file, 'w') as f:
                 json.dump(history, f, indent=2)
@@ -1090,157 +1371,132 @@ class SimpleSAMDetector(Node):
 
     def visualization_callback(self):
         """Display camera feed with detections in OpenCV window"""
-        # Use captured frame if available, otherwise latest_rgb
         frame_to_display = self.captured_frame if self.frame_captured else self.latest_rgb
-        
+
         if frame_to_display is None:
-            # Show waiting message
             blank = np.zeros((480, 640, 3), dtype=np.uint8)
-            cv2.putText(
-                blank, 
-                f"Waiting for {self.rgb_topic}...", 
-                (100, 240),
-                cv2.FONT_HERSHEY_SIMPLEX, 
-                1.0, 
-                (255, 255, 255), 
-                2
-            )
+            cv2.putText(blank, f"Waiting for {self.rgb_topic}...", (80, 240),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.65, (160, 160, 160), 1)
             cv2.imshow(self.window_name, blank)
             cv2.waitKey(1)
             return
-        
-        # Create visualization image
+
         vis_image = frame_to_display.copy()
-        
-        # Determine if we should show corner points (when detections < 3)
-        # For debug and finding u,v in image
+
+        # Distinct color palette per object (BGR)
+        COLORS = [
+            (0,  200, 255),   # amber
+            (80, 255, 80),    # lime
+            (255, 80,  80),   # blue
+            (255, 0,  200),   # magenta
+            (0,  230, 230),   # yellow
+            (200, 80, 255),   # violet
+            (0,  255, 180),   # spring green
+            (255, 180,  0),   # sky blue
+        ]
+
         show_corner_points = len(self.latest_detections) < 5
-        
-        # Draw detections
+
+        # ── Pass 1: draw all masks first (underneath boxes) ──────────────────
+        mask_overlay = vis_image.copy()
+        for idx, det in enumerate(self.latest_detections):
+            color = COLORS[idx % len(COLORS)]
+            mask = det['mask']
+            mask_overlay[mask > 0] = (
+                int(color[0] * 0.55),
+                int(color[1] * 0.55),
+                int(color[2] * 0.55),
+            )
+        vis_image = cv2.addWeighted(vis_image, 0.6, mask_overlay, 0.4, 0)
+
+        # ── Pass 2: boxes, labels, debug corners ─────────────────────────────
         for idx, det in enumerate(self.latest_detections):
             bbox = det['bbox']
             confidence = det['confidence']
             distance = det.get('distance_cm')
-            obj_no = idx  # Object number
-            
-            # Draw bounding box
-            cv2.rectangle(
-                vis_image, 
-                (bbox[0], bbox[1]), 
-                (bbox[2], bbox[3]), 
-                (0, 255, 0),  # Green
-                2
-            )
-            
-            # Display 4 corner coordinates if detections < 3
-            # Debug: Show corner coordinates when detections < 5 (for u,v verification)
+            color = COLORS[idx % len(COLORS)]
+            x1, y1, x2, y2 = bbox
+
+            # Corner-bracket bounding box (professional look)
+            clen = max(14, int(min(x2 - x1, y2 - y1) * 0.15))
+            lw = 2
+            for (px, py, dx, dy) in [
+                (x1, y1,  1,  1), (x2, y1, -1,  1),
+                (x1, y2,  1, -1), (x2, y2, -1, -1),
+            ]:
+                cv2.line(vis_image, (px, py), (px + dx * clen, py), color, lw)
+                cv2.line(vis_image, (px, py), (px, py + dy * clen), color, lw)
+            # Thin dim full rectangle
+            cv2.rectangle(vis_image, (x1, y1), (x2, y2), color, 1)
+
+            # ── Debug corner coordinates ──────────────────────────────────
             if show_corner_points:
-                font_scale = 0.4
-                font_thickness = 1
-                text_color = (0, 255, 255)  # Yellow text for visibility
-                bg_color = (0, 0, 0)  # Black background
-                padding = 2
-                
-                # Draw all 4 corners in multi-line format for better readability
                 corners_text = [
-                    f"TL:({bbox[0]},{bbox[1]})",
-                    f"TR:({bbox[2]},{bbox[1]})",
-                    f"BL:({bbox[0]},{bbox[3]})",
-                    f"BR:({bbox[2]},{bbox[3]})"
+                    f"TL:({x1},{y1})", f"TR:({x2},{y1})",
+                    f"BL:({x1},{y2})", f"BR:({x2},{y2})",
                 ]
-                
-                # Position text block above bbox
-                start_y = max(bbox[1] - 80, 20)  # Ensure it stays on screen
-                line_height = 18
-                
+                start_y = max(y1 - 68, 26)
                 for i, line_text in enumerate(corners_text):
-                    text_size, _ = cv2.getTextSize(line_text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, font_thickness)
-                    y_pos = start_y + (i * line_height)
-                    
-                    # Draw background
-                    cv2.rectangle(
-                        vis_image,
-                        (bbox[0] - padding, y_pos - text_size[1] - padding),
-                        (bbox[0] + text_size[0] + padding, y_pos + padding),
-                        bg_color,
-                        -1
-                    )
-                    
-                    # Draw text
-                    cv2.putText(
-                        vis_image,
-                        line_text,
-                        (bbox[0], y_pos),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        font_scale,
-                        text_color,
-                        font_thickness
-                    )
-            
-            # Draw filled mask with transparency
-            mask = det['mask']
-            colored_mask = np.zeros_like(vis_image)
-            colored_mask[:, :] = (0, 255, 0)  # Green overlay
-            vis_image = np.where(
-                mask[..., None] > 0,
-                cv2.addWeighted(vis_image, 0.7, colored_mask, 0.3, 0),
-                vis_image
-            )
-            
-            # Draw label with object number and distance
+                    ts, _ = cv2.getTextSize(line_text, cv2.FONT_HERSHEY_SIMPLEX, 0.33, 1)
+                    ty = start_y + i * 16
+                    cv2.rectangle(vis_image, (x1 - 2, ty - ts[1] - 2),
+                                  (x1 + ts[0] + 2, ty + 2), (15, 15, 15), -1)
+                    cv2.putText(vis_image, line_text, (x1, ty),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.33, color, 1)
+
+            # ── Label ─────────────────────────────────────────────────────
             if distance is not None:
-                label = f"#{obj_no} {det.get('class_name', det['id'])}: {confidence:.2f} ({distance:.1f}cm)"
+                label = f"#{idx} {det.get('class_name', det['id'])}  {confidence:.2f}  {distance:.1f}cm"
             else:
-                label = f"#{obj_no} {det.get('class_name', det['id'])}: {confidence:.2f}"
-            
-            label_size, _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
-            
-            # Label background
-            cv2.rectangle(
-                vis_image,
-                (bbox[0], bbox[1] - label_size[1] - 10),
-                (bbox[0] + label_size[0], bbox[1]),
-                (0, 255, 0),
-                -1
-            )
-            
-            # Label text
-            cv2.putText(
-                vis_image,
-                label,
-                (bbox[0], bbox[1] - 5),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.6,
-                (0, 0, 0),  # Black text
-                2
-            )
-        
-        # Add info overlay
+                label = f"#{idx} {det.get('class_name', det['id'])}  {confidence:.2f}"
+
+            fs, ft = 0.38, 1
+            (lw_px, lh_px), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, fs, ft)
+            pad = 4
+            accent = 3  # color accent bar width
+
+            # Place label above bbox; clamp to image top
+            ly = y1 - pad - 2
+            if ly - lh_px - pad < 0:
+                ly = y1 + lh_px + pad + 2
+
+            bx1 = x1
+            bx2 = x1 + accent + pad + lw_px + pad
+            by1 = ly - lh_px - pad
+            by2 = ly + pad
+
+            # Clamp to image bounds
+            bx1 = max(0, bx1);  by1 = max(0, by1)
+            bx2 = min(vis_image.shape[1] - 1, bx2)
+            by2 = min(vis_image.shape[0] - 1, by2)
+
+            # Semi-transparent dark background
+            roi = vis_image[by1:by2, bx1:bx2]
+            if roi.size > 0:
+                dark = np.full_like(roi, (18, 18, 18))
+                vis_image[by1:by2, bx1:bx2] = cv2.addWeighted(roi, 0.25, dark, 0.75, 0)
+
+            # Color accent bar on left
+            cv2.rectangle(vis_image, (bx1, by1), (bx1 + accent, by2), color, -1)
+
+            # White label text
+            cv2.putText(vis_image, label, (bx1 + accent + pad, ly),
+                        cv2.FONT_HERSHEY_SIMPLEX, fs, (240, 240, 240), ft)
+
+        # ── Top info bar ─────────────────────────────────────────────────────
+        h, w = vis_image.shape[:2]
+        bar_h = 22
         mode_text = "CONTINUOUS" if self.continuous_detection else "SINGLE SHOT"
-        corner_indicator = " [CORNER POINTS ON]" if show_corner_points else ""
-        info_text = f"Mode: {mode_text} | Objects: {len(self.latest_detections)}{corner_indicator}"
-        
-        cv2.putText(
-            vis_image,
-            info_text,
-            (10, 30),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.7,
-            (255, 255, 255),  # White
-            2
-        )
-        
-        cv2.putText(
-            vis_image,
-            info_text,
-            (10, 30),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.7,
-            (0, 0, 0),  # Black outline
-            4
-        )
-        
-        # Show image
+        obj_count = len(self.latest_detections)
+        debug_tag = "  [DEBUG]" if (show_corner_points and obj_count > 0) else ""
+        info_text = f"Mode: {mode_text}  |  Objects detected: {obj_count}{debug_tag}"
+
+        roi = vis_image[0:bar_h, 0:w]
+        dark_bar = np.full_like(roi, (12, 12, 12))
+        vis_image[0:bar_h, 0:w] = cv2.addWeighted(roi, 0.25, dark_bar, 0.75, 0)
+        cv2.putText(vis_image, info_text, (8, 15),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.42, (210, 210, 210), 1)
+
         cv2.imshow(self.window_name, vis_image)
         cv2.waitKey(1)
     

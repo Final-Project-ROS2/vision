@@ -5,9 +5,6 @@ from rclpy.node import Node
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from custom_interfaces.srv import DetectObjects, FindObject, PixelToReal, FindObjectReal, FindObjectAngleBB, FindMultiObjectReal, FindMultiObject
-
-
-
 """
 ros2 service call /find_object custom_interfaces/srv/FindObjectReal "{label: 'bowl'}"
 
@@ -77,7 +74,7 @@ class FindObjectServiceNode(Node):
         )
         
         self.get_logger().info('Find Object Service Node initialized')
-        
+
         # Wait for services to be available
         self.wait_for_services()
     
@@ -102,6 +99,43 @@ class FindObjectServiceNode(Node):
         
         self.get_logger().info('Service clients ready')
     
+    def _log_find_object_call(self, label, response):
+        """Append a /find_object call result to find_object_history.json for the dashboard."""
+        try:
+            with self._history_lock:
+                history = []
+                if self._history_file.exists():
+                    try:
+                        with open(self._history_file, 'r') as f:
+                            history = json.load(f)
+                        if not isinstance(history, list):
+                            history = []
+                    except Exception:
+                        history = []
+
+                call_id = len(history) + 1
+                entry = {
+                    'call_id': call_id,
+                    'timestamp': datetime.now().isoformat(),
+                    'label_searched': label,
+                    'success': bool(response.success),
+                    'message': response.message,
+                    'object_id': response.object_id,
+                    'bbox': [int(v) for v in response.bbox] if response.bbox else [],
+                    'confidence': float(response.confidence),
+                    'x': float(response.x),
+                    'y': float(response.y),
+                    'z': float(response.z),
+                    'theta': float(response.theta),
+                    'verdict': None,
+                }
+                history.append(entry)
+                history = history[-50:]  # keep last 50
+                with open(self._history_file, 'w') as f:
+                    json.dump(history, f, indent=2)
+        except Exception as e:
+            self.get_logger().warn(f'Failed to log find_object call: {e}')
+
     def find_object_callback(self, request, response):
         """
         Main service callback for /find_object
@@ -266,7 +300,8 @@ class FindObjectServiceNode(Node):
             response.y = 0.0
             response.z = 0.0
             response.theta = 0.0
-        
+
+        self._log_find_object_call(label, response)
         return response
 
 

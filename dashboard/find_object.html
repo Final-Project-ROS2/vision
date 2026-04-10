@@ -1,0 +1,817 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Find Object — Vision Benchmark</title>
+    <style>
+        :root {
+            --bg:            #f1f5f9;
+            --surface:       #ffffff;
+            --border:        #e2e8f0;
+            --text-primary:  #0f172a;
+            --text-secondary:#64748b;
+            --text-muted:    #94a3b8;
+            --ok:   #22c55e;
+            --warn: #f59e0b;
+            --fail: #ef4444;
+            --nav-bg:   #0f172a;
+            --nav-text: #94a3b8;
+            --accent:   #6366f1;
+            --radius:    10px;
+            --radius-sm: 6px;
+            --shadow:    0 1px 3px rgba(0,0,0,.08), 0 1px 2px rgba(0,0,0,.05);
+            --shadow-md: 0 4px 6px rgba(0,0,0,.07), 0 2px 4px rgba(0,0,0,.05);
+        }
+        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: var(--bg);
+            color: var(--text-primary);
+            font-size: 14px;
+            line-height: 1.5;
+            display: flex;
+            min-height: 100vh;
+        }
+
+        /* ── Sidebar ── */
+        #sidebar {
+            width: 226px; min-width: 226px;
+            background: var(--nav-bg);
+            position: fixed; top: 0; left: 0;
+            height: 100vh; z-index: 100;
+            display: flex; flex-direction: column;
+            overflow-y: auto;
+        }
+        .sb-brand { padding: 22px 18px 16px; border-bottom: 1px solid rgba(255,255,255,.07); }
+        .sb-brand-title { font-size: 13px; font-weight: 700; color: #fff; line-height: 1.35; }
+        .sb-brand-sub   { font-size: 11px; color: var(--nav-text); margin-top: 4px; }
+        .sb-live {
+            display: flex; align-items: center; gap: 8px;
+            padding: 9px 18px; border-bottom: 1px solid rgba(255,255,255,.07);
+            font-size: 11px; color: var(--nav-text);
+        }
+        .live-dot {
+            width: 7px; height: 7px; border-radius: 50%;
+            background: var(--ok); animation: pulse 2s infinite; flex-shrink: 0;
+        }
+        @keyframes pulse { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:.45;transform:scale(.8)} }
+        .sb-group {
+            font-size: 10px; font-weight: 700; text-transform: uppercase;
+            letter-spacing: 1.1px; color: rgba(255,255,255,.22); padding: 16px 18px 6px;
+        }
+        .sb-link {
+            display: flex; align-items: center; gap: 10px;
+            padding: 8px 18px; color: var(--nav-text); font-size: 12.5px;
+            font-weight: 500; cursor: pointer; border-left: 3px solid transparent;
+            transition: background .12s, color .12s; user-select: none;
+        }
+        .sb-link:hover { background: rgba(255,255,255,.06); color: #fff; }
+        .sb-link.active { border-left-color: var(--accent); color: #fff; background: rgba(255,255,255,.05); }
+        .sb-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+        .sb-count {
+            margin-left: auto; font-size: 11px; font-weight: 600;
+            background: rgba(255,255,255,.09); padding: 1px 7px;
+            border-radius: 10px; color: rgba(255,255,255,.45);
+            min-width: 24px; text-align: center;
+        }
+
+        /* ── Main ── */
+        #main { margin-left: 226px; flex: 1; min-width: 0; display: flex; flex-direction: column; }
+        #topbar {
+            background: var(--surface); border-bottom: 1px solid var(--border);
+            padding: 13px 28px; display: flex; align-items: center; gap: 16px;
+            position: sticky; top: 0; z-index: 90; box-shadow: var(--shadow);
+        }
+        .topbar-title { font-size: 15px; font-weight: 700; }
+        .topbar-sub   { font-size: 11.5px; color: var(--text-secondary); margin-top: 1px; }
+        .topbar-right { margin-left: auto; display: flex; align-items: center; gap: 10px; }
+        .page-body { padding: 24px 28px; flex: 1; }
+
+        /* ── Buttons ── */
+        .btn {
+            padding: 8px 18px; border-radius: var(--radius-sm); font-size: 13px;
+            font-weight: 600; cursor: pointer; border: 1px solid var(--border);
+            background: transparent; color: var(--text-secondary); transition: all .13s;
+        }
+        .btn:hover { background: var(--bg); color: var(--text-primary); }
+        .btn-primary {
+            background: var(--accent); color: #fff; border-color: var(--accent);
+        }
+        .btn-primary:hover { background: #4f46e5; border-color: #4f46e5; }
+        .btn-ok   { background: #dcfce7; color: #15803d; border-color: #bbf7d0; }
+        .btn-ok:hover { background: #bbf7d0; }
+        .btn-fail { background: #fee2e2; color: #dc2626; border-color: #fecaca; }
+        .btn-fail:hover { background: #fecaca; }
+        .btn-sm { padding: 4px 12px; font-size: 12px; }
+
+        /* ── Card ── */
+        .card {
+            background: var(--surface); border: 1px solid var(--border);
+            border-radius: var(--radius); box-shadow: var(--shadow); margin-bottom: 22px;
+            overflow: hidden;
+        }
+        .card-head {
+            padding: 15px 20px; border-bottom: 1px solid var(--border);
+            display: flex; align-items: center; gap: 12px; background: #fafbfc;
+        }
+        .card-accent { width: 4px; height: 38px; border-radius: 3px; flex-shrink: 0; }
+        .card-title    { font-size: 14px; font-weight: 700; }
+        .card-subtitle { font-size: 11px; color: var(--text-secondary); margin-top: 2px; font-family: monospace; }
+        .card-badge {
+            margin-left: auto; font-size: 11px; font-weight: 700;
+            padding: 4px 12px; border-radius: 14px; color: #fff; white-space: nowrap;
+        }
+        .card-body { padding: 20px; }
+
+        /* ── Trigger panel ── */
+        .trigger-grid {
+            display: grid; grid-template-columns: 1fr auto; gap: 10px; align-items: end;
+            margin-bottom: 16px;
+        }
+        .field-group { display: flex; flex-direction: column; gap: 4px; }
+        .field-label { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .6px; color: var(--text-secondary); }
+        .field-input {
+            padding: 9px 14px; border: 1px solid var(--border); border-radius: var(--radius-sm);
+            font-size: 13px; outline: none; transition: border-color .15s;
+            background: var(--bg); color: var(--text-primary);
+        }
+        .field-input:focus { border-color: var(--accent); background: #fff; }
+
+        .status-bar {
+            padding: 10px 14px; border-radius: var(--radius-sm);
+            font-size: 12.5px; font-weight: 500; margin-bottom: 16px;
+            display: flex; align-items: center; gap: 8px;
+        }
+        .status-idle    { background: #f1f5f9; color: var(--text-secondary); }
+        .status-running { background: #eff6ff; color: #1d4ed8; border: 1px solid #bfdbfe; }
+        .status-ok      { background: #dcfce7; color: #15803d; border: 1px solid #bbf7d0; }
+        .status-fail    { background: #fee2e2; color: #dc2626; border: 1px solid #fecaca; }
+
+        /* ── Result panel ── */
+        .result-grid {
+            display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 16px;
+        }
+        @media (max-width: 700px) { .result-grid { grid-template-columns: 1fr; } }
+        .result-section { }
+        .result-label { font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .7px; color: var(--text-muted); margin-bottom: 8px; }
+        .kv-list { display: flex; flex-direction: column; gap: 5px; }
+        .kv-row  { display: flex; align-items: baseline; gap: 8px; }
+        .kv-key  { font-size: 11.5px; color: var(--text-secondary); min-width: 90px; flex-shrink: 0; }
+        .kv-val  { font-size: 13px; font-weight: 600; color: var(--text-primary); font-family: monospace; }
+
+        /* ── HITL panel ── */
+        .hitl-panel {
+            border: 2px solid #f59e0b; border-radius: var(--radius);
+            background: #fffbeb; padding: 18px 20px;
+            margin-bottom: 16px;
+        }
+        .hitl-title {
+            font-size: 14px; font-weight: 700; color: #92400e; margin-bottom: 6px;
+            display: flex; align-items: center; gap: 8px;
+        }
+        .hitl-subtitle { font-size: 12px; color: #78350f; margin-bottom: 14px; }
+        .hitl-buttons  { display: flex; gap: 10px; flex-wrap: wrap; }
+        .hitl-note     { font-size: 11.5px; color: var(--text-secondary); margin-top: 10px; }
+
+        .verdict-ok   { background: #dcfce7; color: #15803d; border: 1px solid #bbf7d0; border-radius: 8px; padding: 8px 16px; font-weight: 700; font-size: 13px; display: inline-flex; align-items: center; gap: 6px; }
+        .verdict-fail { background: #fee2e2; color: #dc2626; border: 1px solid #fecaca; border-radius: 8px; padding: 8px 16px; font-weight: 700; font-size: 13px; display: inline-flex; align-items: center; gap: 6px; }
+        .verdict-pending { background: #fffbeb; color: #92400e; border: 1px solid #fde68a; border-radius: 8px; padding: 8px 16px; font-weight: 700; font-size: 13px; display: inline-flex; align-items: center; gap: 6px; }
+
+        /* ── KPI row ── */
+        .kpi-row { display: flex; gap: 14px; margin-bottom: 22px; flex-wrap: wrap; }
+        .kpi-tile {
+            background: var(--surface); border: 1px solid var(--border);
+            border-radius: var(--radius); padding: 14px 18px; box-shadow: var(--shadow);
+            flex: 1; min-width: 130px; position: relative; overflow: hidden;
+        }
+        .kpi-tile::before { content:''; position: absolute; top:0;left:0;right:0;height:3px;background:var(--t-accent,#6366f1); }
+        .kpi-val { font-size: 28px; font-weight: 700; line-height: 1; margin-bottom: 5px; font-variant-numeric: tabular-nums; }
+        .kpi-lbl { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .6px; color: var(--text-secondary); }
+
+        /* ── History table ── */
+        .table-wrap { overflow-x: auto; max-height: 480px; overflow-y: auto; }
+        .table-wrap::-webkit-scrollbar { width: 5px; height: 5px; }
+        .table-wrap::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
+        table { width: 100%; border-collapse: collapse; font-size: 13px; }
+        thead tr { position: sticky; top: 0; z-index: 10; }
+        th {
+            background: #f8fafc; color: var(--text-secondary); font-size: 10.5px;
+            font-weight: 700; text-transform: uppercase; letter-spacing: .7px;
+            padding: 10px 14px; text-align: left; border-bottom: 2px solid var(--border);
+            white-space: nowrap;
+        }
+        td { padding: 10px 14px; border-bottom: 1px solid #f1f5f9; vertical-align: middle; }
+        tbody tr:hover td { background: #f8fafc; }
+        tbody tr:last-child td { border-bottom: none; }
+        .no-data-row td { text-align: center; padding: 38px 20px; color: var(--text-muted); font-style: italic; }
+
+        /* ── Chips ── */
+        .chip { display: inline-flex; align-items: center; gap: 3px; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; white-space: nowrap; }
+        .chip-ok    { background: #dcfce7; color: #15803d; }
+        .chip-fail  { background: #fee2e2; color: #dc2626; }
+        .chip-warn  { background: #fffbeb; color: #92400e; }
+        .chip-muted { background: #f1f5f9; color: #64748b; }
+        .chip-label { background: #ede9fe; color: #6d28d9; }
+        .mono { font-family: monospace; font-size: 11.5px; color: var(--text-secondary); }
+        .ts   { font-size: 11px; color: var(--text-muted); white-space: nowrap; }
+
+        /* ── Conf bar ── */
+        .conf-bar { display: flex; align-items: center; gap: 7px; }
+        .conf-track { width: 56px; height: 5px; background: #e2e8f0; border-radius: 3px; overflow: hidden; flex-shrink: 0; }
+        .conf-fill { height: 100%; border-radius: 3px; }
+        .conf-fill.high { background: var(--ok); }
+        .conf-fill.med  { background: var(--warn); }
+        .conf-fill.low  { background: var(--fail); }
+        .conf-num { font-size: 12px; font-weight: 600; min-width: 34px; font-variant-numeric: tabular-nums; }
+        .conf-num.high { color: #15803d; }
+        .conf-num.med  { color: #92400e; }
+        .conf-num.low  { color: #b91c1c; }
+
+        .footer {
+            border-top: 1px solid var(--border); padding: 11px 28px;
+            display: flex; align-items: center; justify-content: space-between;
+            font-size: 11px; color: var(--text-muted); background: var(--surface);
+        }
+
+        /* ── Spinner ── */
+        .spinner {
+            width: 16px; height: 16px; border: 2px solid #bfdbfe;
+            border-top-color: #1d4ed8; border-radius: 50%;
+            animation: spin .7s linear infinite; flex-shrink: 0;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        /* ── Accuracy badge in history table ── */
+        tr.verdict-row-ok   td:first-child { border-left: 3px solid var(--ok); }
+        tr.verdict-row-fail td:first-child { border-left: 3px solid var(--fail); }
+        tr.verdict-row-none td:first-child { border-left: 3px solid transparent; }
+    </style>
+</head>
+<body>
+
+<!-- ══ SIDEBAR ══ -->
+<nav id="sidebar">
+    <div class="sb-brand">
+        <div class="sb-brand-title">Vision Pipeline<br>Research Dashboard</div>
+        <div class="sb-brand-sub">ROS 2 · Real-time Monitor</div>
+    </div>
+    <div class="sb-live"><div class="live-dot"></div>Live · auto-refresh</div>
+
+    <div class="sb-group">Navigation</div>
+    <div class="sb-link" onclick="window.location.href='index.html'">
+        <div class="sb-dot" style="background:#64748b"></div>
+        Main Dashboard
+    </div>
+    <div class="sb-link active">
+        <div class="sb-dot" style="background:var(--accent)"></div>
+        Find Object
+        <span class="sb-count" id="nav-total">0</span>
+    </div>
+
+    <div class="sb-group">Stats</div>
+    <div class="sb-link" onclick="scrollTo('sec-trigger')">
+        <div class="sb-dot" style="background:#10b981"></div>
+        Trigger Service
+    </div>
+    <div class="sb-link" onclick="scrollTo('sec-hitl')">
+        <div class="sb-dot" style="background:#f59e0b"></div>
+        Human-in-the-Loop
+        <span class="sb-count" id="nav-pending">0</span>
+    </div>
+    <div class="sb-link" onclick="scrollTo('sec-history')">
+        <div class="sb-dot" style="background:var(--accent)"></div>
+        Call History
+        <span class="sb-count" id="nav-history">0</span>
+    </div>
+    <div class="sb-link" onclick="scrollTo('sec-accuracy')">
+        <div class="sb-dot" style="background:#ec4899"></div>
+        Accuracy Report
+    </div>
+</nav>
+
+<!-- ══ MAIN ══ -->
+<div id="main">
+
+    <div id="topbar">
+        <div>
+            <div class="topbar-title">Find Object — Service Benchmark</div>
+            <div class="topbar-sub">/find_object · SAM + CLIP + OBB + Pixel-to-Real · Human-in-the-Loop accuracy</div>
+        </div>
+        <div class="topbar-right">
+            <div class="sb-live" style="border:1px solid var(--border);border-radius:20px;padding:5px 13px;background:var(--bg);">
+                <div class="live-dot"></div>
+                <span style="font-size:12px;color:var(--text-secondary)">Auto-refresh 3 s</span>
+            </div>
+            <button class="btn" onclick="clearHistory()">Clear History</button>
+        </div>
+    </div>
+
+    <div class="page-body">
+
+        <!-- ── KPI row ── -->
+        <div class="kpi-row">
+            <div class="kpi-tile" style="--t-accent:#6366f1">
+                <div class="kpi-val" id="kpiTotal">0</div>
+                <div class="kpi-lbl">Total Calls</div>
+            </div>
+            <div class="kpi-tile" style="--t-accent:#22c55e">
+                <div class="kpi-val" id="kpiSuccess">0</div>
+                <div class="kpi-lbl">Succeeded</div>
+            </div>
+            <div class="kpi-tile" style="--t-accent:#ef4444">
+                <div class="kpi-val" id="kpiFailed">0</div>
+                <div class="kpi-lbl">Failed</div>
+            </div>
+            <div class="kpi-tile" style="--t-accent:#ec4899">
+                <div class="kpi-val" id="kpiAccuracy">—</div>
+                <div class="kpi-lbl">HITL Accuracy</div>
+            </div>
+            <div class="kpi-tile" style="--t-accent:#f59e0b">
+                <div class="kpi-val" id="kpiPending">0</div>
+                <div class="kpi-lbl">Pending Review</div>
+            </div>
+            <div class="kpi-tile" style="--t-accent:#06b6d4">
+                <div class="kpi-val" id="kpiAvgConf">—</div>
+                <div class="kpi-lbl">Avg Confidence</div>
+            </div>
+        </div>
+
+        <!-- ── Trigger panel ── -->
+        <div id="sec-trigger" class="card">
+            <div class="card-head">
+                <div class="card-accent" style="background:#10b981"></div>
+                <div>
+                    <div class="card-title">Trigger /find_object Service</div>
+                    <div class="card-subtitle">ros2 service call /find_object custom_interfaces/srv/FindObjectReal "{label: '...'}"</div>
+                </div>
+            </div>
+            <div class="card-body">
+                <div class="trigger-grid">
+                    <div class="field-group">
+                        <div class="field-label">Object Label</div>
+                        <input id="labelInput" class="field-input" type="text" placeholder="e.g.  bowl, cup, bottle, box" value="bowl"
+                               onkeydown="if(event.key==='Enter') triggerService()">
+                    </div>
+                    <button class="btn btn-primary" onclick="triggerService()" id="triggerBtn">
+                        ▶ Call Service
+                    </button>
+                </div>
+                <div id="statusBar" class="status-bar status-idle">Ready — enter a label and press Call Service.</div>
+
+                <!-- Live result ── shown after a successful call -->
+                <div id="resultBlock" style="display:none">
+                    <div class="result-grid">
+                        <div class="result-section">
+                            <div class="result-label">Detection</div>
+                            <div class="kv-list">
+                                <div class="kv-row"><span class="kv-key">Label searched</span><span class="kv-val" id="resLabel">—</span></div>
+                                <div class="kv-row"><span class="kv-key">Object ID</span><span class="kv-val" id="resObjId">—</span></div>
+                                <div class="kv-row"><span class="kv-key">Confidence</span><span class="kv-val" id="resConf">—</span></div>
+                                <div class="kv-row"><span class="kv-key">Bounding Box</span><span class="kv-val" id="resBBox">—</span></div>
+                                <div class="kv-row"><span class="kv-key">Status</span><span class="kv-val" id="resStatus">—</span></div>
+                            </div>
+                        </div>
+                        <div class="result-section">
+                            <div class="result-label">World Coordinates + Angle</div>
+                            <div class="kv-list">
+                                <div class="kv-row"><span class="kv-key">X (m)</span><span class="kv-val" id="resX">—</span></div>
+                                <div class="kv-row"><span class="kv-key">Y (m)</span><span class="kv-val" id="resY">—</span></div>
+                                <div class="kv-row"><span class="kv-key">Z (m)</span><span class="kv-val" id="resZ">—</span></div>
+                                <div class="kv-row"><span class="kv-key">θ (rad)</span><span class="kv-val" id="resTheta">—</span></div>
+                                <div class="kv-row"><span class="kv-key">θ (deg)</span><span class="kv-val" id="resThetaDeg">—</span></div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="result-section" style="margin-bottom:12px">
+                        <div class="result-label">Message from service</div>
+                        <div id="resMessage" style="font-size:12.5px;color:var(--text-secondary);background:var(--bg);padding:10px 14px;border-radius:var(--radius-sm);font-family:monospace;word-break:break-all"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- ── Human-in-the-Loop panel ── -->
+        <div id="sec-hitl" class="card">
+            <div class="card-head">
+                <div class="card-accent" style="background:#f59e0b"></div>
+                <div>
+                    <div class="card-title">Human-in-the-Loop Verification</div>
+                    <div class="card-subtitle">Review latest detection result — mark as correct or incorrect</div>
+                </div>
+                <span class="card-badge" id="hitlBadge" style="background:#f59e0b">Waiting for call…</span>
+            </div>
+            <div class="card-body">
+                <div id="hitlEmpty" style="color:var(--text-muted);font-style:italic;font-size:13px">
+                    No result to review yet. Trigger the service above first.
+                </div>
+                <div id="hitlContent" style="display:none">
+                    <div class="hitl-panel">
+                        <div class="hitl-title">
+                            <span>&#128270;</span>
+                            Was the detected object correct?
+                        </div>
+                        <div class="hitl-subtitle" id="hitlQuestion">
+                            Service returned: <strong id="hitlObjLabel">—</strong> (ID: <span id="hitlObjId">—</span>)
+                            at world position (<span id="hitlXYZ">—</span>), θ = <span id="hitlTheta">—</span> rad
+                        </div>
+                        <div id="hitlVerdictDisplay"></div>
+                        <div class="hitl-buttons" id="hitlButtons">
+                            <button class="btn btn-ok" onclick="submitVerdict(true)">&#10003; Correct — Object matches label</button>
+                            <button class="btn btn-fail" onclick="submitVerdict(false)">&#10007; Incorrect — Wrong / missing object</button>
+                        </div>
+                        <div class="hitl-note" id="hitlNote">Your verdict will be recorded against this call in the history table.</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- ── Call History ── -->
+        <div id="sec-history" class="card">
+            <div class="card-head">
+                <div class="card-accent" style="background:var(--accent)"></div>
+                <div>
+                    <div class="card-title">Call History</div>
+                    <div class="card-subtitle">find_object_history.json · newest first · max 50 calls</div>
+                </div>
+                <span class="card-badge" id="historyBadge" style="background:var(--accent)">0 Calls</span>
+            </div>
+            <div class="table-wrap">
+                <table>
+                    <thead><tr>
+                        <th>#</th>
+                        <th>Timestamp</th>
+                        <th>Label</th>
+                        <th>Object ID</th>
+                        <th>Confidence</th>
+                        <th>Bounding Box</th>
+                        <th>X (m)</th>
+                        <th>Y (m)</th>
+                        <th>Z (m)</th>
+                        <th>θ (deg)</th>
+                        <th>Service OK</th>
+                        <th>HITL Verdict</th>
+                        <th>Verify</th>
+                        <th>Message</th>
+                    </tr></thead>
+                    <tbody id="historyBody">
+                        <tr class="no-data-row"><td colspan="14">No calls yet — trigger the service above.</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- ── Accuracy Report ── -->
+        <div id="sec-accuracy" class="card">
+            <div class="card-head">
+                <div class="card-accent" style="background:#ec4899"></div>
+                <div>
+                    <div class="card-title">Accuracy Report</div>
+                    <div class="card-subtitle">Per-label breakdown from human-in-the-loop verdicts</div>
+                </div>
+            </div>
+            <div class="table-wrap">
+                <table>
+                    <thead><tr>
+                        <th>Label</th>
+                        <th>Total Calls</th>
+                        <th>Succeeded</th>
+                        <th>Failed</th>
+                        <th>Reviewed</th>
+                        <th>Correct</th>
+                        <th>Incorrect</th>
+                        <th>HITL Accuracy</th>
+                        <th>Avg Confidence</th>
+                    </tr></thead>
+                    <tbody id="accuracyBody">
+                        <tr class="no-data-row"><td colspan="9">No data yet.</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+    </div><!-- /page-body -->
+
+    <div class="footer">
+        <span>Find Object Benchmark · Vision Pipeline · ROS 2</span>
+        <span>Last updated: <span id="lastUpdated">—</span></span>
+    </div>
+</div><!-- /main -->
+
+<script>
+// ── State ──────────────────────────────────────────────────────────────────
+let history    = [];          // all calls loaded from server
+let pendingIdx = null;        // index into history[] awaiting HITL verdict
+
+// ── Utilities ──────────────────────────────────────────────────────────────
+function confClass(v) { return v >= 0.7 ? 'high' : v >= 0.4 ? 'med' : 'low'; }
+function confBar(v) {
+    if (v == null || v === '') return '<span style="color:var(--text-muted)">—</span>';
+    const cls = confClass(v), pct = Math.min(100, Math.round(v * 100));
+    return `<div class="conf-bar">
+        <div class="conf-track"><div class="conf-fill ${cls}" style="width:${pct}%"></div></div>
+        <span class="conf-num ${cls}">${Number(v).toFixed(3)}</span>
+    </div>`;
+}
+function tsShort(t) {
+    if (!t) return '<span class="ts">—</span>';
+    return `<span class="ts">${new Date(t).toLocaleString()}</span>`;
+}
+function scrollTo(id) {
+    const el = document.getElementById(id);
+    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+function setStatus(type, msg) {
+    const el = document.getElementById('statusBar');
+    el.className = 'status-bar status-' + type;
+    el.innerHTML = type === 'running'
+        ? `<div class="spinner"></div> ${msg}`
+        : msg;
+}
+
+// ── Trigger service ────────────────────────────────────────────────────────
+async function triggerService() {
+    const label = document.getElementById('labelInput').value.trim();
+    if (!label) { setStatus('fail', '&#9888; Please enter an object label.'); return; }
+
+    document.getElementById('triggerBtn').disabled = true;
+    document.getElementById('resultBlock').style.display = 'none';
+    setStatus('running', `Calling /find_object with label "<strong>${label}</strong>"…`);
+
+    try {
+        const res  = await fetch('/api/find-object', {
+            method:  'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body:    JSON.stringify({ label })
+        });
+        const data = await res.json();
+
+        if (data.error) {
+            setStatus('fail', '&#10007; ' + data.error);
+        } else if (data.success) {
+            setStatus('ok', `&#10003; Found "<strong>${label}</strong>" — confidence ${Number(data.confidence).toFixed(3)}`);
+        } else {
+            setStatus('fail', `&#10007; Service returned failure — ${data.message}`);
+        }
+
+        // Populate live result block
+        showResult(data, label);
+
+        // Reload history (server appended new entry)
+        await loadHistory();
+
+        // Point HITL to the new entry
+        if (history.length) {
+            pendingIdx = history.length - 1;
+            showHITL(history[pendingIdx]);
+        }
+
+    } catch (e) {
+        setStatus('fail', '&#10007; Network/server error: ' + e.message);
+    } finally {
+        document.getElementById('triggerBtn').disabled = false;
+    }
+}
+
+function showResult(data, label) {
+    const rb = document.getElementById('resultBlock');
+    rb.style.display = 'block';
+    document.getElementById('resLabel').textContent    = label;
+    document.getElementById('resObjId').textContent    = data.object_id || '—';
+    document.getElementById('resConf').innerHTML       = confBar(data.confidence);
+    const bb = data.bbox || [];
+    document.getElementById('resBBox').textContent     = bb.length >= 4
+        ? `[${bb[0]}, ${bb[1]}, ${bb[2]}, ${bb[3]}]` : '—';
+    document.getElementById('resStatus').innerHTML     = data.success
+        ? '<span class="chip chip-ok">&#10003; Success</span>'
+        : '<span class="chip chip-fail">&#10007; Failed</span>';
+    document.getElementById('resX').textContent        = data.x != null ? Number(data.x).toFixed(4) : '—';
+    document.getElementById('resY').textContent        = data.y != null ? Number(data.y).toFixed(4) : '—';
+    document.getElementById('resZ').textContent        = data.z != null ? Number(data.z).toFixed(4) : '—';
+    document.getElementById('resTheta').textContent    = data.theta != null ? Number(data.theta).toFixed(4) : '—';
+    document.getElementById('resThetaDeg').textContent = data.theta != null
+        ? (Number(data.theta) * 180 / Math.PI).toFixed(2) + '°' : '—';
+    document.getElementById('resMessage').textContent  = data.message || '';
+}
+
+// ── Human-in-the-Loop ─────────────────────────────────────────────────────
+function showHITL(entry) {
+    document.getElementById('hitlEmpty').style.display   = 'none';
+    document.getElementById('hitlContent').style.display = 'block';
+
+    const bb = entry.bbox || [];
+    document.getElementById('hitlObjLabel').textContent = entry.label_searched || '—';
+    document.getElementById('hitlObjId').textContent    = entry.object_id || '—';
+    document.getElementById('hitlXYZ').textContent      =
+        `${Number(entry.x||0).toFixed(3)}, ${Number(entry.y||0).toFixed(3)}, ${Number(entry.z||0).toFixed(3)}`;
+    document.getElementById('hitlTheta').textContent    = Number(entry.theta||0).toFixed(4);
+
+    const vd = document.getElementById('hitlVerdictDisplay');
+    const bt = document.getElementById('hitlButtons');
+    const nt = document.getElementById('hitlNote');
+
+    if (entry.verdict === true) {
+        vd.innerHTML = '<div class="verdict-ok">&#10003; Marked CORRECT</div>';
+        bt.style.display = 'none';
+        nt.textContent   = 'Verdict already recorded.';
+        document.getElementById('hitlBadge').textContent = 'Verified ✓';
+    } else if (entry.verdict === false) {
+        vd.innerHTML = '<div class="verdict-fail">&#10007; Marked INCORRECT</div>';
+        bt.style.display = 'none';
+        nt.textContent   = 'Verdict already recorded.';
+        document.getElementById('hitlBadge').textContent = 'Verified ✗';
+    } else {
+        vd.innerHTML = '<div class="verdict-pending">&#9203; Awaiting review</div>';
+        bt.style.display = 'flex';
+        nt.textContent   = 'Your verdict will be recorded against this call.';
+        document.getElementById('hitlBadge').textContent = 'Needs Review';
+    }
+}
+
+async function submitVerdict(correct) {
+    if (pendingIdx === null || pendingIdx >= history.length) return;
+    const entry = history[pendingIdx];
+
+    try {
+        const res  = await fetch('/api/find-object-verdict', {
+            method:  'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body:    JSON.stringify({ call_id: entry.call_id, verdict: correct })
+        });
+        const data = await res.json();
+        if (data.ok) {
+            entry.verdict = correct;
+            showHITL(entry);
+            await loadHistory();
+        } else {
+            alert('Failed to save verdict: ' + (data.error || 'unknown error'));
+        }
+    } catch (e) {
+        alert('Network error: ' + e.message);
+    }
+}
+
+// ── Load history from server ───────────────────────────────────────────────
+async function loadHistory() {
+    try {
+        const res  = await fetch('/api/find-object-history');
+        const data = await res.json();
+        history = Array.isArray(data) ? data : [];
+        renderAll();
+    } catch (e) {
+        console.warn('History unavailable:', e);
+    }
+}
+
+// ── Render ─────────────────────────────────────────────────────────────────
+function renderAll() {
+    renderKPIs();
+    renderHistoryTable();
+    renderAccuracyReport();
+    document.getElementById('lastUpdated').textContent = new Date().toLocaleTimeString();
+}
+
+function renderKPIs() {
+    const total   = history.length;
+    const success = history.filter(h => h.success).length;
+    const failed  = total - success;
+    const reviewed = history.filter(h => h.verdict !== null && h.verdict !== undefined);
+    const correct  = reviewed.filter(h => h.verdict === true).length;
+    const pending  = history.filter(h => h.verdict === null || h.verdict === undefined).length;
+    const accuracy = reviewed.length ? (correct / reviewed.length * 100).toFixed(1) + '%' : '—';
+    const confs    = history.filter(h => h.confidence != null).map(h => h.confidence);
+    const avgConf  = confs.length ? (confs.reduce((s,v)=>s+v,0)/confs.length).toFixed(3) : '—';
+
+    document.getElementById('kpiTotal').textContent    = total;
+    document.getElementById('kpiSuccess').textContent  = success;
+    document.getElementById('kpiFailed').textContent   = failed;
+    document.getElementById('kpiAccuracy').textContent = accuracy;
+    document.getElementById('kpiPending').textContent  = pending;
+    document.getElementById('kpiAvgConf').textContent  = avgConf;
+    document.getElementById('nav-total').textContent   = total;
+    document.getElementById('nav-pending').textContent = pending;
+    document.getElementById('nav-history').textContent = total;
+    document.getElementById('historyBadge').textContent = `${total} Calls`;
+}
+
+function renderHistoryTable() {
+    const tbody = document.getElementById('historyBody');
+    if (!history.length) {
+        tbody.innerHTML = '<tr class="no-data-row"><td colspan="14">No calls yet — trigger the service above.</td></tr>';
+        return;
+    }
+    const rows = history.slice().reverse().map((entry, revIdx) => {
+        const origIdx = history.length - 1 - revIdx;
+        const bb      = entry.bbox || [];
+        const bboxStr = bb.length >= 4 ? `[${bb[0]},${bb[1]},${bb[2]},${bb[3]}]` : '—';
+        const thetaDeg = entry.theta != null ? (Number(entry.theta)*180/Math.PI).toFixed(1)+'°' : '—';
+
+        let verdictChip = '<span class="chip chip-warn">&#9203; Pending</span>';
+        let rowClass    = 'verdict-row-none';
+        if (entry.verdict === true)  { verdictChip = '<span class="chip chip-ok">&#10003; Correct</span>';   rowClass = 'verdict-row-ok'; }
+        if (entry.verdict === false) { verdictChip = '<span class="chip chip-fail">&#10007; Incorrect</span>'; rowClass = 'verdict-row-fail'; }
+
+        const canVerify = (entry.verdict === null || entry.verdict === undefined);
+        const verifyBtns = canVerify
+            ? `<button class="btn btn-ok btn-sm" onclick="quickVerdict(${origIdx},true)" title="Mark correct">&#10003;</button>
+               <button class="btn btn-fail btn-sm" onclick="quickVerdict(${origIdx},false)" style="margin-left:4px" title="Mark incorrect">&#10007;</button>`
+            : '<span style="color:var(--text-muted);font-size:11px">Done</span>';
+
+        return `<tr class="${rowClass}">
+            <td class="mono">${entry.call_id || origIdx+1}</td>
+            <td>${tsShort(entry.timestamp)}</td>
+            <td><span class="chip chip-label">${entry.label_searched || '—'}</span></td>
+            <td class="mono">${entry.object_id || '—'}</td>
+            <td>${confBar(entry.confidence)}</td>
+            <td class="mono" style="font-size:11px">${bboxStr}</td>
+            <td class="mono">${entry.x != null ? Number(entry.x).toFixed(3) : '—'}</td>
+            <td class="mono">${entry.y != null ? Number(entry.y).toFixed(3) : '—'}</td>
+            <td class="mono">${entry.z != null ? Number(entry.z).toFixed(3) : '—'}</td>
+            <td class="mono">${thetaDeg}</td>
+            <td>${entry.success ? '<span class="chip chip-ok">&#10003;</span>' : '<span class="chip chip-fail">&#10007;</span>'}</td>
+            <td>${verdictChip}</td>
+            <td style="white-space:nowrap">${verifyBtns}</td>
+            <td style="max-width:220px;font-size:11.5px;color:var(--text-secondary);word-break:break-word">${entry.message||''}</td>
+        </tr>`;
+    });
+    tbody.innerHTML = rows.join('');
+}
+
+async function quickVerdict(idx, correct) {
+    const entry = history[idx];
+    if (!entry) return;
+    try {
+        const res  = await fetch('/api/find-object-verdict', {
+            method:  'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body:    JSON.stringify({ call_id: entry.call_id, verdict: correct })
+        });
+        const data = await res.json();
+        if (data.ok) {
+            entry.verdict = correct;
+            // If this is also the HITL panel entry, refresh it
+            if (pendingIdx === idx) showHITL(entry);
+            renderAll();
+        }
+    } catch (e) { console.warn('Verdict failed:', e); }
+}
+
+function renderAccuracyReport() {
+    const tbody = document.getElementById('accuracyBody');
+    if (!history.length) {
+        tbody.innerHTML = '<tr class="no-data-row"><td colspan="9">No data yet.</td></tr>';
+        return;
+    }
+
+    const byLabel = {};
+    for (const entry of history) {
+        const lbl = entry.label_searched || 'unknown';
+        if (!byLabel[lbl]) byLabel[lbl] = { total:0, success:0, failed:0, reviewed:0, correct:0, incorrect:0, confs:[] };
+        const b = byLabel[lbl];
+        b.total++;
+        entry.success ? b.success++ : b.failed++;
+        if (entry.verdict === true)  { b.reviewed++; b.correct++;   }
+        if (entry.verdict === false) { b.reviewed++; b.incorrect++; }
+        if (entry.confidence != null) b.confs.push(entry.confidence);
+    }
+
+    const rows = Object.entries(byLabel).sort((a,b)=>b[1].total-a[1].total).map(([lbl, b]) => {
+        const hitlAcc = b.reviewed ? (b.correct/b.reviewed*100).toFixed(1)+'%' : '—';
+        const avgConf = b.confs.length ? confBar(b.confs.reduce((s,v)=>s+v,0)/b.confs.length) : '—';
+        return `<tr>
+            <td><span class="chip chip-label">${lbl}</span></td>
+            <td class="mono">${b.total}</td>
+            <td class="mono" style="color:#15803d">${b.success}</td>
+            <td class="mono" style="color:#dc2626">${b.failed}</td>
+            <td class="mono">${b.reviewed}</td>
+            <td class="mono" style="color:#15803d">${b.correct}</td>
+            <td class="mono" style="color:#dc2626">${b.incorrect}</td>
+            <td>${b.reviewed
+                ? `<div class="conf-bar"><div class="conf-track"><div class="conf-fill ${b.correct/b.reviewed>=.7?'high':b.correct/b.reviewed>=.4?'med':'low'}" style="width:${Math.round(b.correct/b.reviewed*100)}%"></div></div><span class="conf-num ${b.correct/b.reviewed>=.7?'high':b.correct/b.reviewed>=.4?'med':'low'}">${hitlAcc}</span></div>`
+                : '—'}</td>
+            <td>${avgConf}</td>
+        </tr>`;
+    });
+    tbody.innerHTML = rows.join('');
+}
+
+// ── Clear history ─────────────────────────────────────────────────────────
+async function clearHistory() {
+    if (!confirm('Clear all find_object call history?')) return;
+    try {
+        await fetch('/api/find-object-clear', { method: 'POST' });
+        history = [];
+        pendingIdx = null;
+        document.getElementById('hitlEmpty').style.display   = 'block';
+        document.getElementById('hitlContent').style.display = 'none';
+        document.getElementById('hitlBadge').textContent     = 'Waiting for call…';
+        renderAll();
+    } catch (e) { alert('Clear failed: ' + e.message); }
+}
+
+// ── Auto-poll ─────────────────────────────────────────────────────────────
+loadHistory();
+setInterval(loadHistory, 3000);
+</script>
+</body>
+</html>

@@ -511,6 +511,10 @@
         <div class="sb-dot" style="background:#6366f1"></div>
         Object Explorer
     </div>
+    <div class="sb-link" onclick="window.location.href='find_object.html'">
+        <div class="sb-dot" style="background:#10b981"></div>
+        Find Object (HITL)
+    </div>
 </nav>
 
 <!-- ══════════════════════════════════ MAIN ═════════════════════════════════ -->
@@ -539,7 +543,7 @@
             <div class="kpi-card" style="--accent:var(--color-runs)">
                 <div class="kpi-value" id="runHistoryCount">0</div>
                 <div class="kpi-label">Stored Runs</div>
-                <div class="kpi-sub">Rolling last 20</div>
+                <div class="kpi-sub">Rolling last 50</div>
             </div>
             <div class="kpi-card" style="--accent:var(--color-sam)">
                 <div class="kpi-value" id="samCount">0</div>
@@ -580,7 +584,7 @@
                 <div class="section-accent" style="background:var(--color-runs)"></div>
                 <div>
                     <div class="section-title">Vision Run Summary</div>
-                    <div class="section-subtitle">vision_runs_history.json · newest first · max 20 runs</div>
+                    <div class="section-subtitle">vision_runs_history.json · newest first · max 50 runs</div>
                 </div>
                 <span class="section-badge" id="runHistoryBadge" style="background:var(--color-runs)">0 Runs</span>
             </div>
@@ -1049,7 +1053,29 @@
         updateCLIPClassifications(data.clip_classifications);
         updateGraspDetections(data.grasp_detections);
         updateSceneUnderstanding(data.scene_understanding);
+
+        // OBB live records from /api/data (synced from vision_runs_history.json)
+        if (data.obb_detections && data.obb_detections.length) {
+            updateOBBFromLiveData(data.obb_detections);
+        }
+
         document.getElementById('lastUpdated').textContent = new Date().toLocaleTimeString();
+    }
+
+    function updateOBBFromLiveData(records) {
+        // Populate OBB section metrics from the live /api/data feed
+        // (the table itself is rendered by updateOBBSection from run history)
+        if (!records.length) return;
+        const angles = records.map(r => r.angle_deg).filter(a => a != null);
+        if (!angles.length) return;
+        const avg = angles.reduce((s, v) => s + v, 0) / angles.length;
+        document.getElementById('obbAvgAngle').textContent = avg.toFixed(1) + '°';
+        document.getElementById('obbMinAngle').textContent = Math.min(...angles).toFixed(1) + '°';
+        document.getElementById('obbMaxAngle').textContent = Math.max(...angles).toFixed(1) + '°';
+        document.getElementById('obbTotalObjects').textContent = records.length;
+        document.getElementById('obbBadge').textContent = `${records.length} Objects`;
+        setNav('nav-obb', records.length);
+        document.getElementById('obbCount').textContent = records.length;
     }
 
     // ── Pixel to Real ─────────────────────────────────────────────────────────

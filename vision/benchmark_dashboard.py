@@ -75,6 +75,7 @@ class BenchmarkDashboard(Node):
             'sam_detections': [],
             'clip_classifications': [],
             'grasp_detections': [],
+            'obb_detections': [],
             'scene_understanding': [],
             'metadata': {
                 'start_time': datetime.now().isoformat(),
@@ -147,7 +148,10 @@ class BenchmarkDashboard(Node):
         
         # Timer to publish data periodically
         self.publish_timer = self.create_timer(1.0, self.publish_data)
-        
+
+        # Timer to sync CLIP/OBB/GraspNet/Pixel-to-Real from vision_runs_history.json
+        self.sync_timer = self.create_timer(2.0, self.sync_from_run_history)
+
         # Start HTTP server in separate thread
         self.start_http_server()
         
@@ -312,12 +316,125 @@ class BenchmarkDashboard(Node):
         
         self.data['metadata']['total_calls'] += 1
     
+    def sync_from_run_history(self):
+        """Sync CLIP, GraspNet, OBB, and Pixel-to-Real data from vision_runs_history.json
+        so the /api/data endpoint (CLIP / GraspNet / Pixel-to-Real sections) stays populated
+        even when those dedicated service nodes are not running."""
+        try:
+            from pathlib import Path
+            history_file = Path(__file__).parent.parent / 'vision_runs_history.json'
+            if not history_file.exists():
+                return
+
+            with open(history_file, 'r') as f:
+                runs = json.load(f)
+            if not isinstance(runs, list) or not runs:
+                return
+
+            timestamp = datetime.now().isoformat()
+
+            # Rebuild lists from all stored runs (most recent first for display)
+            new_clip   = []
+            new_grasp  = []
+            new_pixel  = []
+            new_obb    = []
+
+            for run in runs:
+                run_ts    = run.get('meta', {}).get('timestamp', timestamp)
+                run_no    = run.get('meta', {}).get('run_no', 0)
+                objects   = run.get('objects', [])
+
+                for obj in objects:
+                    # ── CLIP ──────────────────────────────────────────────────
+                    clip_conf = obj.get('clip_confidence', '')
+                    label     = obj.get('label', '')
+                    if clip_conf != '' and label:
+                        new_clip.append({
+                            'timestamp':    run_ts,
+                            'test_id':      f"{run_no}:{obj.get('object_id', '')}",
+                            'bbox': {
+                                'x1': obj.get('bbox_x1', 0),
+                                'y1': obj.get('bbox_y1', 0),
+                                'x2': obj.get('bbox_x2', 0),
+                                'y2': obj.get('bbox_y2', 0),
+                            },
+                            'label':         label,
+                            'confidence':    float(clip_conf),
+                            'top1_accuracy': float(clip_conf) >= 0.5,
+                        })
+
+                    # ── GraspNet ──────────────────────────────────────────────
+                    grasp = obj.get('grasp', {})
+                    if obj.get('has_grasp') and grasp:
+                        pix = grasp.get('pixel', {})
+                        wld = grasp.get('world', {})
+                        new_grasp.append({
+                            'timestamp':    run_ts,
+                            'test_id':      f"{run_no}:{obj.get('object_id', '')}",
+                            'object_id':    obj.get('object_id', ''),
+                            'pixel_position': {'u': pix.get('u', 0), 'v': pix.get('v', 0)},
+                            'world_position': {
+                                'x': wld.get('x', 0.0),
+                                'y': wld.get('y', 0.0),
+                                'z': wld.get('z', 0.0),
+                            },
+                            'quality_score':     float(grasp.get('quality_score', 0.0)),
+                            'grasp_width':       float(grasp.get('grasp_width', 0.0)),
+                            'approach_direction': grasp.get('approach_direction', ''),
+                            'bbox': [obj.get('bbox_x1', 0), obj.get('bbox_y1', 0),
+                                     obj.get('bbox_x2', 0), obj.get('bbox_y2', 0)],
+                        })
+
+                    # ── Pixel-to-Real ─────────────────────────────────────────
+                    world = obj.get('world', {})
+                    if world and world.get('x') is not None:
+                        new_pixel.append({
+                            'timestamp': run_ts,
+                            'test_id':   f"{run_no}:{obj.get('object_id', '')}",
+                            'input':     {'u': world.get('u', 0), 'v': world.get('v', 0)},
+                            'output':    {'x': float(world.get('x', 0.0)),
+                                          'y': float(world.get('y', 0.0)),
+                                          'z': float(world.get('z', 0.0))},
+                        })
+
+                    # ── OBB ───────────────────────────────────────────────────
+                    obb_angle = obj.get('obb_angle_deg', '')
+                    if obb_angle != '':
+                        new_obb.append({
+                            'timestamp':   run_ts,
+                            'test_id':     f"{run_no}:{obj.get('object_id', '')}",
+                            'object_id':   obj.get('object_id', ''),
+                            'label':       obj.get('label', ''),
+                            'angle_deg':   float(obb_angle),
+                            'theta_rad':   float(obj.get('obb_theta_rad', 0.0)),
+                            'width_px':    float(obj.get('obb_width_px', 0.0)),
+                            'height_px':   float(obj.get('obb_height_px', 0.0)),
+                            'center_u':    float(obj.get('obb_center_u', 0.0)),
+                            'center_v':    float(obj.get('obb_center_v', 0.0)),
+                            'sam_confidence': float(obj.get('sam_confidence', 0.0)),
+                            'bbox': [obj.get('bbox_x1', 0), obj.get('bbox_y1', 0),
+                                     obj.get('bbox_x2', 0), obj.get('bbox_y2', 0)],
+                        })
+
+            # Only update if we got new data (avoids overwriting live topic data with empty)
+            if new_clip:
+                self.data['clip_classifications'] = new_clip[-1000:]
+            if new_grasp:
+                self.data['grasp_detections'] = new_grasp[-1000:]
+            if new_pixel:
+                self.data['pixel_to_real'] = new_pixel[-1000:]
+            if new_obb:
+                self.data['obb_detections'] = new_obb[-1000:]
+
+        except Exception as e:
+            self.get_logger().warn(f'sync_from_run_history failed: {e}')
+
     def publish_data(self):
         """Publish benchmark data to topic"""
         msg = String()
         msg.data = json.dumps(self.data, cls=_ROSJSONEncoder)
         self.data_publisher.publish(msg)
-    
+
     def clear_data_callback(self, request, response):
         """Clear all benchmark data"""
         self.data = {
@@ -325,16 +442,17 @@ class BenchmarkDashboard(Node):
             'sam_detections': [],
             'clip_classifications': [],
             'grasp_detections': [],
+            'obb_detections': [],
             'scene_understanding': [],
             'metadata': {
                 'start_time': datetime.now().isoformat(),
                 'total_calls': 0
             }
         }
-        
+
         response.success = True
         response.message = "Benchmark data cleared"
-        
+
         self.get_logger().info('Benchmark data cleared')
         return response
     
@@ -348,7 +466,7 @@ class BenchmarkDashboard(Node):
         except Exception:
             html_dir = Path(__file__).parent.parent / 'dashboard'
 
-        # History JSON is written by simple_sam_detector next to the installed module
+        # History JSON files written next to the installed module
         package_path = Path(__file__).parent.parent
 
         self.get_logger().info(f'Dashboard HTML dir: {html_dir}')
@@ -360,47 +478,219 @@ class BenchmarkDashboard(Node):
             self.get_logger().warn('Creating basic HTML file...')
             html_dir.mkdir(exist_ok=True)
             self.create_default_html(html_file)
-        
-        # Custom handler that serves files from html_dir and provides data endpoint
+
+        node_logger = self.get_logger()
+
+        # Custom handler that serves files and provides API endpoints
         class DashboardHandler(SimpleHTTPRequestHandler):
             def __init__(self, *args, dashboard_node=None, **kwargs):
                 self.dashboard_node = dashboard_node
                 super().__init__(*args, directory=str(html_dir), **kwargs)
-            
+
+            # ── helpers ────────────────────────────────────────────────────
+            def _json_response(self, data, status=200):
+                body = json.dumps(data, cls=_ROSJSONEncoder).encode()
+                self.send_response(status)
+                self.send_header('Content-type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(body)
+
+            def _read_json_file(self, path, default):
+                try:
+                    if path.exists():
+                        with open(path, 'r') as f:
+                            return json.load(f)
+                except Exception:
+                    pass
+                return default
+
+            def _write_json_file(self, path, data):
+                with open(path, 'w') as f:
+                    json.dump(data, f, indent=2)
+
+            # ── OPTIONS (CORS pre-flight) ───────────────────────────────────
+            def do_OPTIONS(self):
+                self.send_response(204)
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+                self.send_header('Access-Control-Allow-Headers', 'Content-Type')
+                self.end_headers()
+
+            # ── GET ────────────────────────────────────────────────────────
             def do_GET(self):
                 if self.path == '/api/data':
-                    # Serve benchmark data as JSON
-                    self.send_response(200)
-                    self.send_header('Content-type', 'application/json')
-                    self.send_header('Access-Control-Allow-Origin', '*')
-                    self.end_headers()
-                    data_json = json.dumps(self.dashboard_node.data, cls=_ROSJSONEncoder)
-                    self.wfile.write(data_json.encode())
+                    self._json_response(self.dashboard_node.data)
+
                 elif self.path == '/api/run-history':
-                    # Serve vision_runs_history.json from workspace root
                     history_file = package_path / 'vision_runs_history.json'
-                    self.send_response(200)
-                    self.send_header('Content-type', 'application/json')
-                    self.send_header('Access-Control-Allow-Origin', '*')
-                    self.end_headers()
-                    if history_file.exists():
-                        self.wfile.write(history_file.read_bytes())
-                    else:
-                        self.wfile.write(b'[]')
+                    data = self._read_json_file(history_file, [])
+                    self._json_response(data)
+
+                elif self.path == '/api/find-object-history':
+                    fo_file = package_path / 'find_object_history.json'
+                    data = self._read_json_file(fo_file, [])
+                    self._json_response(data)
+
                 else:
-                    # Serve static files
                     super().do_GET()
-        
+
+            # ── POST ───────────────────────────────────────────────────────
+            def do_POST(self):
+                length = int(self.headers.get('Content-Length', 0))
+                body   = self.rfile.read(length) if length else b'{}'
+                try:
+                    payload = json.loads(body)
+                except Exception:
+                    payload = {}
+
+                if self.path == '/api/find-object':
+                    self._handle_find_object(payload)
+
+                elif self.path == '/api/find-object-verdict':
+                    self._handle_verdict(payload)
+
+                elif self.path == '/api/find-object-clear':
+                    fo_file = package_path / 'find_object_history.json'
+                    self._write_json_file(fo_file, [])
+                    self._json_response({'ok': True})
+
+                else:
+                    self._json_response({'error': 'unknown endpoint'}, 404)
+
+            # ── /api/find-object ──────────────────────────────────────────
+            def _handle_find_object(self, payload):
+                """Call /find_object ROS2 service and persist result."""
+                import subprocess, shlex
+                label = payload.get('label', '').strip()
+                if not label:
+                    self._json_response({'error': 'label is required'}, 400)
+                    return
+
+                fo_file = package_path / 'find_object_history.json'
+                history = self._read_json_file(fo_file, [])
+                call_id = len(history) + 1
+                timestamp = datetime.now().isoformat()
+
+                # Call the ROS2 service via subprocess
+                cmd = (
+                    f"ros2 service call /find_object "
+                    f"custom_interfaces/srv/FindObjectReal "
+                    f"\"{{label: '{label}'}}\""
+                )
+                try:
+                    result = subprocess.run(
+                        cmd, shell=True, capture_output=True, text=True, timeout=30
+                    )
+                    output = result.stdout + result.stderr
+                    node_logger.info(f'find_object [{label}] stdout: {output[:300]}')
+
+                    # Parse the ROS2 CLI response format
+                    entry = _parse_find_object_response(output, label, call_id, timestamp)
+                except subprocess.TimeoutExpired:
+                    entry = {
+                        'call_id': call_id, 'timestamp': timestamp,
+                        'label_searched': label, 'success': False,
+                        'message': 'Service call timed out (30 s)',
+                        'object_id': '', 'bbox': [], 'confidence': 0.0,
+                        'x': 0.0, 'y': 0.0, 'z': 0.0, 'theta': 0.0,
+                        'verdict': None,
+                    }
+                except Exception as e:
+                    entry = {
+                        'call_id': call_id, 'timestamp': timestamp,
+                        'label_searched': label, 'success': False,
+                        'message': f'Error: {e}',
+                        'object_id': '', 'bbox': [], 'confidence': 0.0,
+                        'x': 0.0, 'y': 0.0, 'z': 0.0, 'theta': 0.0,
+                        'verdict': None,
+                    }
+
+                history.append(entry)
+                history = history[-50:]
+                self._write_json_file(fo_file, history)
+                self._json_response(entry)
+
+            # ── /api/find-object-verdict ──────────────────────────────────
+            def _handle_verdict(self, payload):
+                call_id = payload.get('call_id')
+                verdict = payload.get('verdict')  # true / false
+                if call_id is None or verdict is None:
+                    self._json_response({'error': 'call_id and verdict required'}, 400)
+                    return
+
+                fo_file = package_path / 'find_object_history.json'
+                history = self._read_json_file(fo_file, [])
+                updated = False
+                for entry in history:
+                    if entry.get('call_id') == call_id:
+                        entry['verdict'] = bool(verdict)
+                        updated = True
+                        break
+                if updated:
+                    self._write_json_file(fo_file, history)
+                    self._json_response({'ok': True})
+                else:
+                    self._json_response({'error': f'call_id {call_id} not found'}, 404)
+
+            def log_message(self, fmt, *args):
+                pass  # suppress HTTP access log noise
+
+        def _parse_find_object_response(output, label, call_id, timestamp):
+            """Parse ros2 service call CLI output into a dict."""
+            import re
+            entry = {
+                'call_id': call_id, 'timestamp': timestamp,
+                'label_searched': label, 'success': False,
+                'message': output.strip()[:500],
+                'object_id': '', 'bbox': [], 'confidence': 0.0,
+                'x': 0.0, 'y': 0.0, 'z': 0.0, 'theta': 0.0,
+                'verdict': None,
+            }
+            try:
+                # success field
+                m = re.search(r'success=(\w+)', output)
+                if m:
+                    entry['success'] = m.group(1).lower() == 'true'
+                # message field
+                m = re.search(r"message='([^']*)'", output)
+                if m:
+                    entry['message'] = m.group(1)
+                # object_id
+                m = re.search(r"object_id='([^']*)'", output)
+                if m:
+                    entry['object_id'] = m.group(1)
+                # bbox
+                m = re.search(r'bbox=\[([^\]]*)\]', output)
+                if m:
+                    try:
+                        entry['bbox'] = [int(x.strip()) for x in m.group(1).split(',') if x.strip()]
+                    except Exception:
+                        pass
+                # confidence
+                m = re.search(r'confidence=([\d.]+)', output)
+                if m:
+                    entry['confidence'] = float(m.group(1))
+                # x, y, z, theta
+                for field in ('x', 'y', 'z', 'theta'):
+                    m = re.search(rf'{field}=([-\d.]+)', output)
+                    if m:
+                        entry[field] = float(m.group(1))
+            except Exception as e:
+                node_logger.warn(f'Response parse error: {e}')
+            return entry
+
         # Create handler with dashboard_node reference
         def handler_with_node(*args, **kwargs):
             return DashboardHandler(*args, dashboard_node=self, **kwargs)
-        
+
         # Start server in separate thread
         server = HTTPServer(('0.0.0.0', 8080), handler_with_node)
         server_thread = threading.Thread(target=server.serve_forever, daemon=True)
         server_thread.start()
-        
+
         self.get_logger().info(f'HTTP server started on http://localhost:8080')
+        self.get_logger().info(f'Find Object page: http://localhost:8080/find_object.html')
         self.get_logger().info(f'Serving files from: {html_dir}')
     
     def create_default_html(self, html_file):

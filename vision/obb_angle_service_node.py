@@ -401,149 +401,165 @@ class OBBAngleServiceNode(Node):
         """
         if self.latest_rgb_image is None:
             self.get_logger().warn('No RGB image available for visualization')
-            # Show a blank placeholder window
-            blank = np.zeros((800, 1200, 3), dtype=np.uint8)
-            cv2.putText(blank, "Waiting for RGB camera image...", 
-                       (300, 400), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (255, 255, 255), 3)
-            cv2.putText(blank, f"RGB Topic: {self.rgb_topic}", 
-                       (350, 450), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (128, 128, 128), 2)
+            blank = np.zeros((480, 640, 3), dtype=np.uint8)
+            cv2.putText(blank, "Waiting for RGB camera...", (80, 230),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.65, (160, 160, 160), 1)
+            cv2.putText(blank, self.rgb_topic, (80, 258),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.42, (100, 100, 100), 1)
             cv2.imshow(self.window_name, blank)
             cv2.waitKey(1)
             return
-        
+
         vis_image = self.latest_rgb_image.copy()
-        
+        img_h, img_w = vis_image.shape[:2]
+
         # Auto-detect mode
         if mode == "auto":
             mode = "single" if len(results) == 1 else "multi"
-        
-        # Color palette for objects
-        colors = [
-            (255, 255, 0),   # Cyan
-            (255, 0, 255),   # Magenta
-            (0, 255, 255),   # Yellow
-            (255, 128, 0),   # Orange
-            (128, 255, 0),   # Lime
-            (0, 255, 128),   # Spring Green
-            (255, 0, 128),   # Pink
-            (128, 0, 255),   # Purple
+
+        # Distinct color palette (BGR)
+        COLORS = [
+            (0,  200, 255),   # amber
+            (80, 255,  80),   # lime
+            (255,  80,  80),  # blue
+            (255,   0, 200),  # magenta
+            (0,  230, 230),   # yellow
+            (200,  80, 255),  # violet
+            (0,  255, 180),   # spring green
+            (255, 180,   0),  # sky blue
         ]
-        
-        # Process each OBB
+
+        def draw_corner_bracket(img, pts, color, lw=2):
+            """Draw corner-bracket accents on an OBB polygon."""
+            n = len(pts)
+            for i in range(n):
+                A = pts[(i - 1) % n].astype(float)
+                B = pts[i].astype(float)
+                C = pts[(i + 1) % n].astype(float)
+                ab = A - B;  ab_len = np.linalg.norm(ab)
+                cb = C - B;  cb_len = np.linalg.norm(cb)
+                if ab_len == 0 or cb_len == 0:
+                    continue
+                clen = max(10, int(min(ab_len, cb_len) * 0.22))
+                p1 = (B + (ab / ab_len) * clen).astype(int)
+                p2 = (B + (cb / cb_len) * clen).astype(int)
+                cv2.line(img, tuple(B.astype(int)), tuple(p1), color, lw)
+                cv2.line(img, tuple(B.astype(int)), tuple(p2), color, lw)
+
+        def semi_transparent_rect(img, x1, y1, x2, y2, fill, alpha=0.72):
+            """Blend a dark rectangle over a sub-region."""
+            x1 = max(0, x1);  y1 = max(0, y1)
+            x2 = min(img.shape[1] - 1, x2);  y2 = min(img.shape[0] - 1, y2)
+            if x2 <= x1 or y2 <= y1:
+                return
+            roi = img[y1:y2, x1:x2]
+            bg  = np.full_like(roi, fill)
+            img[y1:y2, x1:x2] = cv2.addWeighted(roi, 1 - alpha, bg, alpha, 0)
+
+        # ── Process each OBB ─────────────────────────────────────────────────
         for idx, result_tuple in enumerate(results):
-            # Unpack (handle optional bbox)
             if len(result_tuple) == 7:
                 object_id, u, v, theta, width, height, bbox = result_tuple
             else:
                 object_id, u, v, theta, width, height = result_tuple
                 bbox = None
-            
-            color = colors[idx % len(colors)]
-            
-            # Draw AABB first if provided (for single object mode)
-            if bbox is not None and mode == "single":
-                x1, y1, x2, y2 = bbox
-                cv2.rectangle(vis_image, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
-                cv2.putText(vis_image, "Input AABB", (int(x1), int(y1) - 5),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-            
-            # Get OBB corner points
-            box_points = self.get_obb_corner_points(u, v, theta, width, height)
-            
-            # Draw OBB
-            cv2.drawContours(vis_image, [box_points], 0, color, 3)
-            
-            # Draw center point
-            if mode == "single":
-                cv2.circle(vis_image, (int(u), int(v)), 8, (0, 0, 255), -1)  # Red center
-                cv2.circle(vis_image, (int(u), int(v)), 10, (255, 255, 255), 2)  # White outline
-            else:
-                cv2.circle(vis_image, (int(u), int(v)), 6, (255, 255, 255), -1)
-                cv2.circle(vis_image, (int(u), int(v)), 8, color, 2)
-            
-            # Draw angle arrow perpendicular to WIDTH (shorter dimension), with -90° offset so 0° points UP
-            arrow_length = height   # Use height (shorter dimension) for arrow length
-            # Arrow perpendicular to width = add 90° to theta, then -90° for visualization
-            visual_theta = theta + np.pi / 2 - np.pi / 2  # Perpendicular, then visualization offset
-            end_x = int(u + arrow_length * np.cos(visual_theta))
-            end_y = int(v + arrow_length * np.sin(visual_theta))
-            arrow_thickness = 3 if mode == "single" else 2
-            cv2.arrowedLine(vis_image, (int(u), int(v)), (end_x, end_y), 
-                          (255, 0, 255) if mode == "single" else color, 
-                          arrow_thickness, tipLength=0.3)
-            
-            # Draw label (use remapped angle: 90deg - original geometry angle)
+
+            color = COLORS[idx % len(COLORS)]
+            cx, cy = int(u), int(v)
             angle_geom_deg = np.rad2deg(theta)
             angle_deg = 90.0 - angle_geom_deg
-            
+
+            # ── Input AABB (single mode only) ─────────────────────────────
+            if bbox is not None and mode == "single":
+                ax1, ay1, ax2, ay2 = int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3])
+                # Dashed-style thin rectangle (draw as corner brackets only)
+                aabb_pts = np.array([[ax1,ay1],[ax2,ay1],[ax2,ay2],[ax1,ay2]])
+                draw_corner_bracket(vis_image, aabb_pts, (80, 200, 80), lw=1)
+                cv2.rectangle(vis_image, (ax1, ay1), (ax2, ay2), (80, 200, 80), 1)
+                # Small label
+                ts, _ = cv2.getTextSize("AABB", cv2.FONT_HERSHEY_SIMPLEX, 0.33, 1)
+                semi_transparent_rect(vis_image, ax1, ay1 - ts[1] - 6, ax1 + ts[0] + 4, ay1, (18, 18, 18))
+                cv2.putText(vis_image, "AABB", (ax1 + 2, ay1 - 3),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.33, (80, 200, 80), 1)
+
+            # ── OBB outline ───────────────────────────────────────────────
+            box_pts = self.get_obb_corner_points(u, v, theta, width, height)
+            # Thin full outline
+            cv2.drawContours(vis_image, [box_pts], 0, color, 1)
+            # Corner bracket accents
+            draw_corner_bracket(vis_image, box_pts, color, lw=2)
+
+            # ── Center dot ────────────────────────────────────────────────
+            cv2.circle(vis_image, (cx, cy), 5, (15, 15, 15), -1)   # dark fill
+            cv2.circle(vis_image, (cx, cy), 5, color, 2)            # color ring
+            cv2.circle(vis_image, (cx, cy), 2, (240, 240, 240), -1) # white center
+
+            # ── Angle arrow ───────────────────────────────────────────────
+            visual_theta = theta + np.pi / 2 - np.pi / 2
+            arrow_len = int(max(height * 0.55, 20))
+            end_x = int(cx + arrow_len * np.cos(visual_theta))
+            end_y = int(cy + arrow_len * np.sin(visual_theta))
+            cv2.arrowedLine(vis_image, (cx, cy), (end_x, end_y),
+                            color, 2, tipLength=0.35)
+
+            # ── Info panel (single) / compact label (multi) ───────────────
             if mode == "single":
-                # Concise info box for single object
                 info_lines = [
                     f"{object_id}",
-                    f"Center: ({int(u)}, {int(v)})",
-                    f"Angle: {angle_deg:.1f}deg",
-                    f"Size: {width:.0f}x{height:.0f}"
+                    f"Center  ({cx}, {cy})",
+                    f"Angle   {angle_deg:.1f} deg",
+                    f"Size    {width:.0f} x {height:.0f} px",
                 ]
-                
-                # Draw compact info box at top-right
-                font_scale = 0.6
-                font_thickness = 2
-                line_spacing = 25
-                
-                max_width = 0
-                for line in info_lines:
-                    (text_w, text_h), _ = cv2.getTextSize(line, cv2.FONT_HERSHEY_SIMPLEX, 
-                                                          font_scale, font_thickness)
-                    max_width = max(max_width, text_w)
-                
-                box_height = len(info_lines) * line_spacing + 15
-                box_x = vis_image.shape[1] - max_width - 25
-                box_y = 15
-                
-                # Background with transparency effect
-                overlay = vis_image.copy()
-                cv2.rectangle(overlay, (box_x - 8, box_y - 8),
-                            (box_x + max_width + 8, box_y + box_height), (0, 0, 0), -1)
-                cv2.addWeighted(overlay, 0.7, vis_image, 0.3, 0, vis_image)
-                
+                fs, ft = 0.42, 1
+                pad = 8
+                line_h = 20
+                max_w = max(cv2.getTextSize(l, cv2.FONT_HERSHEY_SIMPLEX, fs, ft)[0][0]
+                            for l in info_lines)
+                panel_w = max_w + pad * 2 + 4   # +4 for accent bar
+                panel_h = len(info_lines) * line_h + pad
+                px = img_w - panel_w - 10
+                py = 28   # sits below top bar
+
+                # Background
+                semi_transparent_rect(vis_image, px - 2, py, px + panel_w, py + panel_h, (15, 15, 15))
+                # Left accent bar
+                cv2.rectangle(vis_image, (px - 2, py), (px + 2, py + panel_h), color, -1)
                 # Border
-                cv2.rectangle(vis_image, (box_x - 8, box_y - 8),
-                            (box_x + max_width + 8, box_y + box_height), color, 2)
-                
-                # Text lines
+                cv2.rectangle(vis_image, (px - 2, py), (px + panel_w, py + panel_h), color, 1)
+
                 for i, line in enumerate(info_lines):
-                    y_pos = box_y + (i * line_spacing) + 18
-                    cv2.putText(vis_image, line, (box_x, y_pos),
-                              cv2.FONT_HERSHEY_SIMPLEX, font_scale, color, font_thickness)
+                    ty = py + pad + i * line_h + line_h // 2
+                    # Dim the label for the first line (object id) — draw in color
+                    text_color = color if i == 0 else (210, 210, 210)
+                    cv2.putText(vis_image, line, (px + 6, ty),
+                                cv2.FONT_HERSHEY_SIMPLEX, fs, text_color, ft)
             else:
-                # Compact label for multi-object
-                label = f"#{idx} {angle_deg:.1f}deg"
-                label_x = int(u + 15)
-                label_y = int(v)
-                
-                # Text with outline
-                cv2.putText(vis_image, label, (label_x, label_y),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 5)
-                cv2.putText(vis_image, label, (label_x, label_y),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
-        
-        # Add concise title
-        if mode == "single":
-            title = "OBB Detection"
-        else:
-            title = f"OBB Detection ({len(results)} objects)"
-        
-        cv2.putText(vis_image, title, (10, 35), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 3)
-        cv2.putText(vis_image, title, (10, 35), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 255), 2)
-        
-        # Add concise legend at bottom
-        legend_y = vis_image.shape[0] - 20
-        legend_text = "0deg = Vertical | Range: -90deg to +90deg"
-        
-        cv2.putText(vis_image, legend_text, (10, legend_y),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
-        
-        # Display
+                # Compact floating label near center
+                label = f"#{idx}  {angle_deg:.1f}°"
+                fs, ft = 0.38, 1
+                (lw_px, lh_px), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, fs, ft)
+                pad = 4
+                lx = cx + 12
+                ly = cy - 6
+                # Clamp
+                lx = min(lx, img_w - lw_px - pad * 2 - 5)
+                ly = max(ly, lh_px + pad + 2)
+
+                semi_transparent_rect(vis_image, lx - 2, ly - lh_px - pad,
+                                      lx + lw_px + pad * 2 + 3, ly + pad, (15, 15, 15))
+                cv2.rectangle(vis_image, (lx - 2, ly - lh_px - pad),
+                              (lx + 3, ly + pad), color, -1)  # accent bar
+                cv2.putText(vis_image, label, (lx + 5, ly),
+                            cv2.FONT_HERSHEY_SIMPLEX, fs, (230, 230, 230), ft)
+
+        # ── Top info bar ─────────────────────────────────────────────────────
+        bar_h = 24
+        obj_count = len(results)
+        title = f"OBB Detection  |  Objects: {obj_count}  |  0 deg = Vertical"
+        semi_transparent_rect(vis_image, 0, 0, img_w, bar_h, (12, 12, 12), alpha=0.78)
+        cv2.putText(vis_image, title, (8, 16),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.42, (210, 210, 210), 1)
+
         cv2.imshow(self.window_name, vis_image)
         cv2.waitKey(1)
         

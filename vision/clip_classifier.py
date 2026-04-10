@@ -1286,244 +1286,173 @@ class CLIPClassifier(Node):
     
     def visualization_callback(self):
         """Display camera feed with classification in OpenCV window"""
-        # Use latest_rgb for real-time display, fallback to captured_frame
         frame_to_display = self.latest_rgb if self.latest_rgb is not None else self.captured_frame
-        
+
         if frame_to_display is None:
-            # Show waiting message
             blank = np.zeros((480, 640, 3), dtype=np.uint8)
-            cv2.putText(
-                blank, 
-                f"Waiting to capture frame from {self.rgb_topic}...", 
-                (50, 240),
-                cv2.FONT_HERSHEY_SIMPLEX, 
-                0.8, 
-                (255, 255, 255), 
-                2
-            )
+            cv2.putText(blank, f"Waiting for {self.rgb_topic}...", (60, 240),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (160, 160, 160), 1)
             cv2.imshow(self.window_name, blank)
             cv2.waitKey(1)
             return
-        
-        # Create visualization image from latest live frame
+
         vis_image = frame_to_display.copy()
         h, w = vis_image.shape[:2]
-        
-        # Check if we have region classifications (from SAM auto-classification)
+
+        # ── Helpers ──────────────────────────────────────────────────────────
+        COLORS = [
+            (0,  200, 255),   # amber
+            (80, 255,  80),   # lime
+            (255,  80,  80),  # blue
+            (255,   0, 200),  # magenta
+            (0,  230, 230),   # yellow
+            (200,  80, 255),  # violet
+            (0,  255, 180),   # spring green
+            (255, 180,   0),  # sky blue
+        ]
+        FOUND_COLOR = (60, 230, 60)   # bright green for "found" object
+
+        def semi_rect(img, x1, y1, x2, y2, fill=(15, 15, 15), alpha=0.75):
+            x1, y1 = max(0, x1), max(0, y1)
+            x2, y2 = min(img.shape[1]-1, x2), min(img.shape[0]-1, y2)
+            if x2 <= x1 or y2 <= y1:
+                return
+            roi = img[y1:y2, x1:x2]
+            img[y1:y2, x1:x2] = cv2.addWeighted(roi, 1-alpha, np.full_like(roi, fill), alpha, 0)
+
+        def corner_bracket(img, x1, y1, x2, y2, color, lw=2):
+            clen = max(10, int(min(x2-x1, y2-y1) * 0.15))
+            for (px, py, dx, dy) in [(x1,y1,1,1),(x2,y1,-1,1),(x1,y2,1,-1),(x2,y2,-1,-1)]:
+                cv2.line(img, (px, py), (px + dx*clen, py), color, lw)
+                cv2.line(img, (px, py), (px, py + dy*clen), color, lw)
+
+        def draw_label(img, text, x, y, color, fs=0.36, ft=1, pad=4, accent=3):
+            """Draw a semi-transparent dark label with a color accent bar."""
+            (lw_px, lh_px), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, fs, ft)
+            bx1, by1 = x, y - lh_px - pad
+            bx2, by2 = x + accent + pad + lw_px + pad, y + pad
+            semi_rect(img, bx1, by1, bx2, by2)
+            cv2.rectangle(img, (max(0,bx1), max(0,by1)), (max(0,bx1)+accent, max(0,by2)), color, -1)
+            cv2.putText(img, text, (bx1 + accent + pad, y),
+                        cv2.FONT_HERSHEY_SIMPLEX, fs, (235, 235, 235), ft)
+
+        # ── Region classifications (SAM + CLIP pipeline) ──────────────────
         if self.latest_region_classifications:
-            # Draw each classified region with bounding box and label
-            for region in self.latest_region_classifications:
-                bbox = region['bbox']
-                top_pred = region['top_prediction']
+            for ri, region in enumerate(self.latest_region_classifications):
+                bbox      = region['bbox']
+                top_pred  = region['top_prediction']
                 region_id = region['region_id']
-                
-                # Draw bounding box
-                cv2.rectangle(
-                    vis_image,
-                    (bbox[0], bbox[1]),
-                    (bbox[2], bbox[3]),
-                    (0, 255, 255),  # Yellow for classified regions
-                    3
-                )
-                
-                # Prepare label text
-                label = f"#{region_id}: {top_pred['label']}"
-                conf = f"{top_pred['confidence']:.1%}"
-                
-                # Calculate label position (above bbox)
-                label_size, _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)
-                
-                # Draw label background
-                cv2.rectangle(
-                    vis_image,
-                    (bbox[0], bbox[1] - label_size[1] - 25),
-                    (bbox[0] + max(label_size[0], 100), bbox[1]),
-                    (0, 255, 255),
-                    -1
-                )
-                
-                # Draw label text
-                cv2.putText(
-                    vis_image,
-                    label,
-                    (bbox[0] + 5, bbox[1] - 10),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.7,
-                    (0, 0, 0),
-                    2
-                )
-                
-                # Draw confidence
-                cv2.putText(
-                    vis_image,
-                    conf,
-                    (bbox[0] + 5, bbox[1] - 30),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.6,
-                    (0, 0, 0),
-                    2
-                )
-            
-            # Add info text
-            info_text = f"Classified Regions: {len(self.latest_region_classifications)}"
-            cv2.putText(
-                vis_image,
-                info_text,
-                (10, 30),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.8,
-                (0, 255, 255),
-                2
-            )
-            
-        # Draw full image classification overlay (if available and no regions)
+                color     = COLORS[ri % len(COLORS)]
+                x1, y1, x2, y2 = bbox
+
+                # Corner-bracket bbox + thin outline
+                cv2.rectangle(vis_image, (x1, y1), (x2, y2), color, 1)
+                corner_bracket(vis_image, x1, y1, x2, y2, color, lw=2)
+
+                # Label: "#id  class  conf%"
+                conf_pct = top_pred['confidence']
+                label = f"#{region_id}  {top_pred['label']}  {conf_pct:.0%}"
+
+                # Place above bbox, clamp to image top
+                ly = y1 - 5
+                if ly < 16:
+                    ly = y2 + 16
+                draw_label(vis_image, label, x1, ly, color)
+
+                # Confidence bar under bbox top edge
+                bar_w = x2 - x1
+                filled = max(2, int(bar_w * conf_pct))
+                cv2.rectangle(vis_image, (x1, y1), (x1 + bar_w, y1 + 3), (40, 40, 40), -1)
+                cv2.rectangle(vis_image, (x1, y1), (x1 + filled, y1 + 3), color, -1)
+
+        # ── Full-image classification (no regions) ────────────────────────
         elif self.latest_classification:
-            top_pred = self.latest_classification['output']['top_prediction']
-            all_preds = self.latest_classification['output']['all_predictions'][:5]  # Top 5
-            
-            # Draw semi-transparent overlay at bottom
-            overlay = vis_image.copy()
-            cv2.rectangle(overlay, (0, h-150), (w, h), (0, 0, 0), -1)
-            vis_image = cv2.addWeighted(vis_image, 0.7, overlay, 0.3, 0)
-            
-            # Draw top prediction (large)
-            label_text = f"Top: {top_pred['label']}"
-            conf_text = f"{top_pred['confidence']:.1%}"
-            
-            cv2.putText(
-                vis_image,
-                label_text,
-                (20, h-100),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                1.2,
-                (0, 255, 0),
-                3
-            )
-            
-            cv2.putText(
-                vis_image,
-                conf_text,
-                (20, h-60),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                1.0,
-                (0, 255, 0),
-                2
-            )
-            
-            # Draw top 5 predictions (smaller, on right)
-            y_offset = h - 120
+            top_pred  = self.latest_classification['output']['top_prediction']
+            all_preds = self.latest_classification['output']['all_predictions'][:5]
+
+            # Bottom panel
+            panel_h = 110
+            semi_rect(vis_image, 0, h - panel_h, w, h, fill=(12, 12, 12), alpha=0.80)
+
+            # Top prediction
+            top_label = f"{top_pred['label']}"
+            top_conf  = f"{top_pred['confidence']:.1%}"
+            cv2.putText(vis_image, top_label, (14, h - panel_h + 26),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.65, (80, 255, 80), 1)
+            cv2.putText(vis_image, top_conf, (14, h - panel_h + 46),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.42, (160, 255, 160), 1)
+
+            # Confidence bar for top prediction
+            bar_max = min(w // 2 - 20, 260)
+            filled  = int(bar_max * top_pred['confidence'])
+            cv2.rectangle(vis_image, (14, h - panel_h + 52), (14 + bar_max, h - panel_h + 56), (50, 50, 50), -1)
+            cv2.rectangle(vis_image, (14, h - panel_h + 52), (14 + filled, h - panel_h + 56), (80, 255, 80), -1)
+
+            # Top-5 list on the right
+            col_x = w - 230
+            cv2.putText(vis_image, "Top 5", (col_x, h - panel_h + 18),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.38, (140, 140, 140), 1)
             for i, pred in enumerate(all_preds):
-                text = f"{i+1}. {pred['label']}: {pred['confidence']:.1%}"
-                cv2.putText(
-                    vis_image,
-                    text,
-                    (w - 350, y_offset + i*30),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.6,
-                    (255, 255, 255),
-                    2
-                )
+                row_text  = f"{i+1}. {pred['label']}"
+                row_conf  = f"{pred['confidence']:.0%}"
+                row_y     = h - panel_h + 34 + i * 16
+                row_color = (200, 200, 200) if i > 0 else (80, 255, 80)
+                cv2.putText(vis_image, row_text, (col_x, row_y),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.34, row_color, 1)
+                cv2.putText(vis_image, row_conf, (w - 42, row_y),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.34, row_color, 1)
+
         else:
-            # Show "Call service to classify" message
-            cv2.putText(
-                vis_image,
-                "Call /vision/classify_all or /vision/classify_bb",
-                (20, h-30),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.7,
-                (255, 255, 255),
-                2
-            )
-        
-        # Draw found object highlight (if available)
+            # Idle hint at bottom
+            hint = "Run /vision/classify_all or /vision/classify_bb"
+            semi_rect(vis_image, 0, h - 24, w, h, fill=(12, 12, 12), alpha=0.70)
+            cv2.putText(vis_image, hint, (8, h - 8),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.38, (130, 130, 130), 1)
+
+        # ── Found-object highlight ────────────────────────────────────────
         if self.latest_found_object:
             found = self.latest_found_object
-            bbox = found['bbox']
-            
-            # Draw thick green bounding box for found object
-            cv2.rectangle(
-                vis_image,
-                (bbox[0], bbox[1]),
-                (bbox[2], bbox[3]),
-                (0, 255, 0),  # Green for found object
-                5
-            )
-            
-            # Prepare label text
-            label = f"FOUND: {found['label']}"
-            conf = f"Conf: {found['confidence']:.2f}"
-            
-            # Calculate label position (above bbox)
-            label_size, _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.9, 2)
-            
-            # Draw label background (green)
-            cv2.rectangle(
-                vis_image,
-                (bbox[0], bbox[1] - label_size[1] - 35),
-                (bbox[0] + max(label_size[0], 150), bbox[1]),
-                (0, 255, 0),
-                -1
-            )
-            
-            # Draw label text
-            cv2.putText(
-                vis_image,
-                label,
-                (bbox[0] + 5, bbox[1] - 15),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.9,
-                (0, 0, 0),
-                2
-            )
-            
-            # Draw confidence
-            cv2.putText(
-                vis_image,
-                conf,
-                (bbox[0] + 5, bbox[1] - 40),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.7,
-                (0, 0, 0),
-                2
-            )
-            
-            # Add corner markers
-            corner_size = 15
-            # Top-left
-            cv2.line(vis_image, (bbox[0], bbox[1]), (bbox[0] + corner_size, bbox[1]), (0, 255, 0), 5)
-            cv2.line(vis_image, (bbox[0], bbox[1]), (bbox[0], bbox[1] + corner_size), (0, 255, 0), 5)
-            # Top-right
-            cv2.line(vis_image, (bbox[2], bbox[1]), (bbox[2] - corner_size, bbox[1]), (0, 255, 0), 5)
-            cv2.line(vis_image, (bbox[2], bbox[1]), (bbox[2], bbox[1] + corner_size), (0, 255, 0), 5)
-            # Bottom-left
-            cv2.line(vis_image, (bbox[0], bbox[3]), (bbox[0] + corner_size, bbox[3]), (0, 255, 0), 5)
-            cv2.line(vis_image, (bbox[0], bbox[3]), (bbox[0], bbox[3] - corner_size), (0, 255, 0), 5)
-            # Bottom-right
-            cv2.line(vis_image, (bbox[2], bbox[3]), (bbox[2] - corner_size, bbox[3]), (0, 255, 0), 5)
-            cv2.line(vis_image, (bbox[2], bbox[3]), (bbox[2], bbox[3] - corner_size), (0, 255, 0), 5)
-        
-        # Add title bar
-        cv2.putText(
-            vis_image,
-            f"CLIP Classifier | Frame: {self.frame_counter}",
-            (10, 30),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.7,
-            (0, 0, 0),
-            4
-        )
-        
-        cv2.putText(
-            vis_image,
-            f"CLIP Classifier | Frame: {self.frame_counter}",
-            (10, 30),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.7,
-            (255, 255, 255),
-            2
-        )
-        
-        # Show image
+            bbox  = found['bbox']
+            x1, y1, x2, y2 = bbox
+            conf  = found['confidence']
+
+            # Pulsing-style: thin outline + thick corner brackets
+            cv2.rectangle(vis_image, (x1, y1), (x2, y2), FOUND_COLOR, 1)
+            clen = max(16, int(min(x2-x1, y2-y1) * 0.18))
+            for (px, py, dx, dy) in [(x1,y1,1,1),(x2,y1,-1,1),(x1,y2,1,-1),(x2,y2,-1,-1)]:
+                cv2.line(vis_image, (px, py), (px + dx*clen, py), FOUND_COLOR, 3)
+                cv2.line(vis_image, (px, py), (px, py + dy*clen), FOUND_COLOR, 3)
+
+            # Center dot
+            cx, cy = (x1+x2)//2, (y1+y2)//2
+            cv2.circle(vis_image, (cx, cy), 5, (15, 15, 15), -1)
+            cv2.circle(vis_image, (cx, cy), 5, FOUND_COLOR, 2)
+            cv2.circle(vis_image, (cx, cy), 2, (240, 240, 240), -1)
+
+            # Label + confidence bar
+            label = f"FOUND  {found['label']}  {conf:.0%}"
+            ly = y1 - 5
+            if ly < 16:
+                ly = y2 + 16
+            draw_label(vis_image, label, x1, ly, FOUND_COLOR, fs=0.40, pad=5, accent=4)
+
+            bar_w  = x2 - x1
+            filled = max(2, int(bar_w * conf))
+            cv2.rectangle(vis_image, (x1, y2 - 4), (x1 + bar_w, y2), (40, 40, 40), -1)
+            cv2.rectangle(vis_image, (x1, y2 - 4), (x1 + filled, y2), FOUND_COLOR, -1)
+
+        # ── Top info bar ──────────────────────────────────────────────────
+        bar_h = 22
+        semi_rect(vis_image, 0, 0, w, bar_h, fill=(12, 12, 12), alpha=0.78)
+        if self.latest_region_classifications:
+            status = f"CLIP  |  Regions: {len(self.latest_region_classifications)}  |  Frame: {self.frame_counter}"
+        elif self.latest_classification:
+            status = f"CLIP  |  Full-image mode  |  Frame: {self.frame_counter}"
+        else:
+            status = f"CLIP Classifier  |  Frame: {self.frame_counter}  |  Idle"
+        cv2.putText(vis_image, status, (8, 15),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.42, (210, 210, 210), 1)
+
         cv2.imshow(self.window_name, vis_image)
         cv2.waitKey(1)
     
