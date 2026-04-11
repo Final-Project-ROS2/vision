@@ -764,6 +764,46 @@
                     </tbody>
                 </table>
             </div>
+
+            <!-- find_object_angle_bb direct call history -->
+            <div style="margin-top:18px">
+                <div style="font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:8px;letter-spacing:.4px">
+                    /obb/find_object_angle_bb — Direct Call History
+                    <span id="obbBBCount" style="margin-left:8px;background:#f97316;color:#fff;border-radius:10px;padding:1px 8px;font-size:11px">0</span>
+                </div>
+                <div class="metric-strip" style="margin-bottom:8px">
+                    <div class="metric-tile">
+                        <div class="metric-val" id="obbBBLatestAngle">—</div>
+                        <div class="metric-lbl">Latest Angle (°)</div>
+                    </div>
+                    <div class="metric-tile">
+                        <div class="metric-val" id="obbBBAvgAngle">—</div>
+                        <div class="metric-lbl">Avg Angle (°)</div>
+                    </div>
+                    <div class="metric-tile">
+                        <div class="metric-val" id="obbBBLatestObject">—</div>
+                        <div class="metric-lbl">Latest Object</div>
+                    </div>
+                </div>
+                <div class="table-wrap">
+                    <table>
+                        <thead><tr>
+                            <th>#</th>
+                            <th>Object ID</th>
+                            <th>Angle (°)</th>
+                            <th>Theta (rad)</th>
+                            <th>Center (u, v)</th>
+                            <th>Size (w × h px)</th>
+                            <th>Input BBox</th>
+                            <th>IoU</th>
+                            <th>Timestamp</th>
+                        </tr></thead>
+                        <tbody id="obbBBBody">
+                            <tr class="no-data-row"><td colspan="9">No data — call <code>ros2 service call /obb/find_object_angle_bb ...</code></td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
         </div>
 
         <!-- ── SAM ──────────────────────────────────────────────────── -->
@@ -834,16 +874,58 @@
                 <table>
                     <thead><tr>
                         <th>Test ID</th>
-                        <th>Label</th>
+                        <th>CLIP Label</th>
                         <th>Confidence</th>
                         <th>Top-1 Accuracy</th>
+                        <th>Human Verdict</th>
                         <th>Bounding Box</th>
                         <th>Timestamp</th>
                     </tr></thead>
                     <tbody id="clipBody">
-                        <tr class="no-data-row"><td colspan="6">No CLIP data — start <code>/vision/classify_bbox_filtered</code></td></tr>
+                        <tr class="no-data-row"><td colspan="7">No CLIP data — call <code>ros2 service call /vision/classify_bbox_filtered std_srvs/srv/Trigger</code></td></tr>
                     </tbody>
                 </table>
+            </div>
+
+            <!-- classify_all history sub-section -->
+            <div style="margin-top:18px">
+                <div style="font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:8px;letter-spacing:.4px">
+                    /vision/classify_all — Direct Call History
+                    <span id="caCount" style="margin-left:8px;background:var(--color-clip);color:#fff;border-radius:10px;padding:1px 8px;font-size:11px">0</span>
+                </div>
+                <div class="metric-strip" style="margin-bottom:8px">
+                    <div class="metric-tile">
+                        <div class="metric-val" id="caLatestLabel">—</div>
+                        <div class="metric-lbl">Latest Top Label</div>
+                    </div>
+                    <div class="metric-tile">
+                        <div class="metric-val" id="caLatestConf">—</div>
+                        <div class="metric-lbl">Latest Confidence</div>
+                    </div>
+                    <div class="metric-tile">
+                        <div class="metric-val" id="caAvgConf">—</div>
+                        <div class="metric-lbl">Avg Confidence</div>
+                    </div>
+                    <div class="metric-tile">
+                        <div class="metric-val" id="caAvgLatency">—</div>
+                        <div class="metric-lbl">Avg Latency (s)</div>
+                    </div>
+                </div>
+                <div class="table-wrap">
+                    <table>
+                        <thead><tr>
+                            <th>#</th>
+                            <th>Top Label</th>
+                            <th>Confidence</th>
+                            <th>Top-5 Predictions</th>
+                            <th>Latency (s)</th>
+                            <th>Timestamp</th>
+                        </tr></thead>
+                        <tbody id="caBody">
+                            <tr class="no-data-row"><td colspan="6">No data — call <code>ros2 service call /vision/classify_all std_srvs/srv/Trigger</code></td></tr>
+                        </tbody>
+                    </table>
+                </div>
             </div>
         </div>
 
@@ -1024,10 +1106,18 @@
     // ── /api/data ─────────────────────────────────────────────────────────────
     let lastData = null;
 
+    // Holds latest filtered records so updateDashboard can merge them
+    let _latestFilteredRecords = [];
+
     async function fetchData() {
         try {
             const res = await fetch('/api/data');
             lastData = await res.json();
+            // Also refresh filtered history in the same tick
+            try {
+                const fr = await fetch('/api/classify-filtered-history');
+                _latestFilteredRecords = await fr.json();
+            } catch (_) { _latestFilteredRecords = []; }
             updateDashboard(lastData);
         } catch (e) {
             console.warn('Error fetching /api/data:', e);
@@ -1035,22 +1125,26 @@
     }
 
     function updateDashboard(data) {
+        // Merge /vision/classify_bbox_filtered records directly into clip table
+        const clipRecords = (data.clip_classifications || []).concat(_latestFilteredRecords);
+        const clipCount   = clipRecords.length;
+
         document.getElementById('totalCalls').textContent = data.metadata.total_calls;
         document.getElementById('pixelCount').textContent  = data.pixel_to_real.length;
         document.getElementById('samCount').textContent    = data.sam_detections.length;
-        document.getElementById('clipCount').textContent   = data.clip_classifications.length;
+        document.getElementById('clipCount').textContent   = clipCount;
         document.getElementById('graspCount').textContent  = data.grasp_detections.length;
         document.getElementById('sceneCount').textContent  = data.scene_understanding.length;
 
         setNav('nav-sam',   data.sam_detections.length);
-        setNav('nav-clip',  data.clip_classifications.length);
+        setNav('nav-clip',  clipCount);
         setNav('nav-grasp', data.grasp_detections.length);
         setNav('nav-scene', data.scene_understanding.length);
         setNav('nav-pixel', data.pixel_to_real.length);
 
         updatePixelToReal(data.pixel_to_real);
         updateSAMDetections(data.sam_detections);
-        updateCLIPClassifications(data.clip_classifications);
+        updateCLIPClassifications(clipRecords);
         updateGraspDetections(data.grasp_detections);
         updateSceneUnderstanding(data.scene_understanding);
 
@@ -1127,32 +1221,71 @@
         </tr>`).join('');
     }
 
+    // ── CLIP verdict buttons ──────────────────────────────────────────────────
+    async function clipVerdict(testId, verdict) {
+        try {
+            await fetch('/api/clip-verdict', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({test_id: testId, verdict})
+            });
+            // Refresh immediately so button state updates
+            _latestFilteredRecords = [];
+            try {
+                const fr = await fetch('/api/classify-filtered-history');
+                _latestFilteredRecords = await fr.json();
+            } catch (_) {}
+            if (lastData) updateCLIPClassifications(
+                (lastData.clip_classifications || []).concat(_latestFilteredRecords)
+            );
+        } catch (e) { console.warn('clip verdict error:', e); }
+    }
+
     // ── CLIP Classifications ──────────────────────────────────────────────────
     function updateCLIPClassifications(records) {
         document.getElementById('clipBadge').textContent = `${records.length} Records`;
         const tbody = document.getElementById('clipBody');
         if (!records.length) {
-            tbody.innerHTML = '<tr class="no-data-row"><td colspan="6">No CLIP data — start <code>/vision/classify_bbox_filtered</code></td></tr>';
+            tbody.innerHTML = '<tr class="no-data-row"><td colspan="7">No CLIP data — call <code>ros2 service call /vision/classify_bbox_filtered std_srvs/srv/Trigger</code></td></tr>';
             ['clipTop1','clipAvgConf'].forEach(id => document.getElementById(id).textContent = '—');
             return;
         }
-        const withAcc = records.filter(r => r.top1_accuracy !== null);
-        const top1Acc = withAcc.length
-            ? (withAcc.filter(r => r.top1_accuracy).length / withAcc.length * 100).toFixed(1) + '%'
-            : 'N/A';
+        // Top-1 accuracy computed only from records where human has given verdict
+        const withVerdict = records.filter(r => r.top1_accuracy !== null && r.top1_accuracy !== undefined);
+        const top1Acc = withVerdict.length
+            ? (withVerdict.filter(r => r.top1_accuracy).length / withVerdict.length * 100).toFixed(1) + '%'
+            : 'Pending';
         const avgConf = records.reduce((s, r) => s + r.confidence, 0) / records.length;
 
-        document.getElementById('clipTop1').textContent   = top1Acc;
+        document.getElementById('clipTop1').textContent    = top1Acc;
         document.getElementById('clipAvgConf').textContent = avgConf.toFixed(3);
 
-        tbody.innerHTML = records.slice(-50).reverse().map(r => `<tr>
-            <td class="mono">${r.test_id}</td>
-            <td><span class="chip chip-label">${r.label}</span></td>
-            <td>${confBar(r.confidence)}</td>
-            <td>${formatAccuracy(r.top1_accuracy)}</td>
-            <td class="mono" style="font-size:11px">${JSON.stringify(r.bbox)}</td>
-            <td>${tsShort(r.timestamp)}</td>
-        </tr>`).join('');
+        tbody.innerHTML = records.slice(-50).reverse().map(r => {
+            // Verdict display
+            let verdictCell;
+            if (r.top1_accuracy === true) {
+                verdictCell = `<span style="color:var(--ok);font-weight:600">✓ Correct</span>
+                    <button onclick="clipVerdict(${r.test_id}, false)" style="margin-left:6px;font-size:10px;padding:1px 5px;cursor:pointer;border:1px solid var(--border);border-radius:4px;background:#fff">✗</button>`;
+            } else if (r.top1_accuracy === false) {
+                verdictCell = `<span style="color:var(--fail);font-weight:600">✗ Wrong</span>
+                    <button onclick="clipVerdict(${r.test_id}, true)" style="margin-left:6px;font-size:10px;padding:1px 5px;cursor:pointer;border:1px solid var(--border);border-radius:4px;background:#fff">✓</button>`;
+            } else {
+                verdictCell = `<button onclick="clipVerdict(${r.test_id}, true)"  style="font-size:11px;padding:2px 8px;cursor:pointer;border:1px solid var(--ok);color:var(--ok);border-radius:4px;background:#fff;margin-right:4px">✓ Correct</button>
+                               <button onclick="clipVerdict(${r.test_id}, false)" style="font-size:11px;padding:2px 8px;cursor:pointer;border:1px solid var(--fail);color:var(--fail);border-radius:4px;background:#fff">✗ Wrong</button>`;
+            }
+            const bboxStr = r.bbox ? (typeof r.bbox === 'object' && !Array.isArray(r.bbox)
+                ? `(${r.bbox.x1},${r.bbox.y1})→(${r.bbox.x2},${r.bbox.y2})`
+                : JSON.stringify(r.bbox)) : '—';
+            return `<tr>
+                <td class="mono">${r.test_id}</td>
+                <td><span class="chip chip-label">${r.label}</span></td>
+                <td>${confBar(r.confidence)}</td>
+                <td>${r.top1_accuracy === true ? '<span style="color:var(--ok)">TRUE</span>' : r.top1_accuracy === false ? '<span style="color:var(--fail)">FALSE</span>' : '<span style="color:var(--text-muted)">—</span>'}</td>
+                <td>${verdictCell}</td>
+                <td class="mono" style="font-size:11px">${bboxStr}</td>
+                <td>${tsShort(r.timestamp)}</td>
+            </tr>`;
+        }).join('');
     }
 
     // ── Grasp Detections ──────────────────────────────────────────────────────
@@ -1386,6 +1519,94 @@
         }).join('');
     }
 
+    // ── /vision/classify_all history ─────────────────────────────────────────
+    async function fetchClassifyAllHistory() {
+        try {
+            const res = await fetch('/api/classify-all-history');
+            if (!res.ok) return;
+            const records = await res.json();
+            updateClassifyAllHistory(records);
+        } catch (_) {}
+    }
+
+    function updateClassifyAllHistory(records) {
+        document.getElementById('caCount').textContent = records.length;
+        const tbody = document.getElementById('caBody');
+        if (!records.length) {
+            tbody.innerHTML = '<tr class="no-data-row"><td colspan="6">No data — call <code>ros2 service call /vision/classify_all std_srvs/srv/Trigger</code></td></tr>';
+            ['caLatestLabel','caLatestConf','caAvgConf','caAvgLatency'].forEach(id => document.getElementById(id).textContent = '—');
+            return;
+        }
+        const latest = records[records.length - 1];
+        document.getElementById('caLatestLabel').textContent = latest.top_label || '—';
+        document.getElementById('caLatestConf').textContent  = latest.top_confidence != null ? (latest.top_confidence * 100).toFixed(1) + '%' : '—';
+        const avgConf = records.reduce((s, r) => s + (r.top_confidence || 0), 0) / records.length;
+        document.getElementById('caAvgConf').textContent = (avgConf * 100).toFixed(1) + '%';
+        const avgLat  = records.reduce((s, r) => s + (r.latency_s || 0), 0) / records.length;
+        document.getElementById('caAvgLatency').textContent = avgLat.toFixed(3) + ' s';
+
+        tbody.innerHTML = records.slice(-50).reverse().map(r => {
+            const top5 = (r.all_predictions || []).slice(0, 5).map(p =>
+                `<span class="chip chip-label" style="font-size:10px">${p.label} <strong>${(p.confidence*100).toFixed(0)}%</strong></span>`
+            ).join(' ');
+            return `<tr>
+                <td class="mono">${r.call_id}</td>
+                <td><span class="chip chip-label" style="background:var(--color-clip);color:#fff">${r.top_label}</span></td>
+                <td>${confBar(r.top_confidence)}</td>
+                <td style="max-width:280px;overflow:hidden">${top5}</td>
+                <td class="mono">${r.latency_s != null ? r.latency_s.toFixed(3) : '—'}</td>
+                <td>${tsShort(r.timestamp)}</td>
+            </tr>`;
+        }).join('');
+    }
+
+    // ── /obb/find_object_angle_bb history ────────────────────────────────────
+    async function fetchObbBBHistory() {
+        try {
+            const res = await fetch('/api/obb-bb-history');
+            if (!res.ok) return;
+            const records = await res.json();
+            updateObbBBHistory(records);
+        } catch (_) {}
+    }
+
+    function updateObbBBHistory(records) {
+        document.getElementById('obbBBCount').textContent = records.length;
+        const tbody = document.getElementById('obbBBBody');
+        if (!records.length) {
+            tbody.innerHTML = '<tr class="no-data-row"><td colspan="9">No data — call <code>ros2 service call /obb/find_object_angle_bb ...</code></td></tr>';
+            ['obbBBLatestAngle','obbBBAvgAngle','obbBBLatestObject'].forEach(id => document.getElementById(id).textContent = '—');
+            return;
+        }
+        const latest = records[records.length - 1];
+        document.getElementById('obbBBLatestAngle').textContent  = latest.angle_deg != null ? latest.angle_deg.toFixed(1) + '°' : '—';
+        document.getElementById('obbBBLatestObject').textContent = latest.object_id || '—';
+        const avgAngle = records.reduce((s, r) => s + (r.angle_deg || 0), 0) / records.length;
+        document.getElementById('obbBBAvgAngle').textContent = avgAngle.toFixed(1) + '°';
+
+        tbody.innerHTML = records.slice(-50).reverse().map(r => {
+            const pct      = Math.round(((r.angle_deg + 90) / 180) * 100);
+            const barColor = Math.abs(r.angle_deg) < 20 ? 'var(--ok)' : Math.abs(r.angle_deg) < 60 ? 'var(--warn)' : 'var(--fail)';
+            const bb = r.input_bbox || [];
+            return `<tr>
+                <td class="mono">${r.call_id}</td>
+                <td class="mono">${r.object_id ?? '—'}</td>
+                <td>
+                    <div class="conf-bar">
+                        <div class="conf-track" style="width:70px"><div class="conf-fill" style="width:${pct}%;background:${barColor}"></div></div>
+                        <span class="conf-num" style="color:${barColor};min-width:50px">${r.angle_deg.toFixed(1)}°</span>
+                    </div>
+                </td>
+                <td class="mono">${r.theta_rad != null ? r.theta_rad.toFixed(4) : '—'}</td>
+                <td class="mono">${r.center_u != null ? Math.round(r.center_u) : '—'}, ${r.center_v != null ? Math.round(r.center_v) : '—'}</td>
+                <td class="mono">${r.width_px != null ? Math.round(r.width_px) : '—'} × ${r.height_px != null ? Math.round(r.height_px) : '—'}</td>
+                <td class="mono" style="font-size:11px">${bb.length === 4 ? `(${bb[0]},${bb[1]})→(${bb[2]},${bb[3]})` : '—'}</td>
+                <td class="mono">${r.iou != null ? r.iou.toFixed(3) : '—'}</td>
+                <td>${tsShort(r.timestamp)}</td>
+            </tr>`;
+        }).join('');
+    }
+
     // ── Clear data (legacy) ───────────────────────────────────────────────────
     async function clearData() {
         if (confirm('Clear all in-session benchmark data?')) {
@@ -1394,10 +1615,14 @@
     }
 
     // ── Polling ───────────────────────────────────────────────────────────────
-    setInterval(fetchData,       2000);
-    setInterval(fetchRunHistory, 2000);
+    setInterval(fetchData,             2000);
+    setInterval(fetchRunHistory,       2000);
+    setInterval(fetchClassifyAllHistory, 3000);
+    setInterval(fetchObbBBHistory,       3000);
     fetchData();
     fetchRunHistory();
+    fetchClassifyAllHistory();
+    fetchObbBBHistory();
 </script>
 </body>
 </html>

@@ -129,6 +129,14 @@ class CLIPClassifier(Node):
             # "cobot",
             "green_cube",
             "drill",
+            "remote_control",
+            "orange_cube",
+            "orange_cylinder",
+            "arduino_board",
+            "mouse",
+            "light_blue_cube",
+            "blue_star",
+            "purple_triangle",
             "pink_cube",
             "measuring_tape",
             "screwdriver",
@@ -141,11 +149,11 @@ class CLIPClassifier(Node):
             # "door_handle",
             # "red_ball",
             # "gasket_part",
-            "beer_can",
+            # "beer_can",
             "bowl",
-            "cinder_block",
-            "coke_can",
-            "roomba",
+            # "cinder_block",
+            # "coke_can",
+            # "roomba",
             # "plastic_cup",
             # "hammer",
             # "robotic_arm",
@@ -387,13 +395,16 @@ class CLIPClassifier(Node):
             
             response.success = True
             response.message = json.dumps(classification_data, indent=2)
-            
+
             top_pred = classification_data['output']['top_prediction']
             self.get_logger().info(
                 f"Classification complete: {top_pred['label']} "
                 f"(confidence: {top_pred['confidence']:.2f})"
             )
-            
+
+            # Persist result for dashboard
+            self._save_classify_all_record(classification_data, latency_s=(time.perf_counter() - start))
+
         except Exception as e:
             response.success = False
             response.message = json.dumps({
@@ -563,17 +574,31 @@ class CLIPClassifier(Node):
                 self.get_logger().error("CLIP model not available")
                 return response
             
-            # Check if we have classified regions from SAM subscription
+            # If no SAM regions cached, trigger a fresh detection + classification now
             if not self.latest_region_classifications:
-                response.success = False
-                response.message = json.dumps({
-                    "error": "No classified regions available. Call '/vision/run_pipeline' first to trigger SAM detection.",
-                    "hint": "ros2 service call /vision/run_pipeline std_srvs/srv/Trigger",
-                    "timestamp": datetime.utcnow().isoformat() + "Z"
-                }, indent=2)
-                self.get_logger().warn("No classified regions. Run SAM pipeline first.")
-                return response
-            
+                self.get_logger().info("No cached regions — calling /vision/detect_objects automatically...")
+                bboxes, err = self._call_detect_objects()
+                if err:
+                    response.success = False
+                    response.message = json.dumps({
+                        "error": err,
+                        "hint": "Ensure simple_sam_detector is running",
+                        "timestamp": datetime.utcnow().isoformat() + "Z"
+                    }, indent=2)
+                    self.get_logger().warn(f"Detection failed: {err}")
+                    return response
+                if not bboxes:
+                    response.success = False
+                    response.message = json.dumps({
+                        "error": "No objects detected in the scene",
+                        "timestamp": datetime.utcnow().isoformat() + "Z"
+                    }, indent=2)
+                    self.get_logger().warn("No bboxes returned from detection")
+                    return response
+                self.get_logger().info(f"Got {len(bboxes)} bboxes from detection — classifying with CLIP...")
+                classification_data = self._classify_regions(self.captured_frame, bboxes)
+                self.latest_region_classifications = classification_data['output']['classified_regions']
+
             self.get_logger().info(f"Filtering {len(self.latest_region_classifications)} classified regions by confidence > 0.5")
             
             # Filter regions by confidence >= 0.5
@@ -602,18 +627,21 @@ class CLIPClassifier(Node):
             
             response.success = True
             response.message = json.dumps(result, indent=2)
-            
+
             self.get_logger().info(
                 f"Filtered classification complete: {len(filtered_regions)}/{len(self.latest_region_classifications)} "
                 f"regions passed confidence threshold"
             )
-            
+
             # Log each filtered region
             for region in filtered_regions:
                 self.get_logger().info(
                     f"Region #{region['region_id']}: {region['label']} "
                     f"(confidence: {region['confidence']:.2f})"
                 )
+
+            # Persist to file so benchmark_dashboard can show results in CLIP table
+            self._save_filtered_records(filtered_regions)
             
         except Exception as e:
             response.success = False
@@ -1252,7 +1280,79 @@ class CLIPClassifier(Node):
         }
         
         return schema
-    
+
+    def _save_classify_all_record(self, classification_data: Dict, latency_s: float = 0.0):
+        """Append a /vision/classify_all result to classify_all_history.json for the dashboard."""
+        try:
+            from pathlib import Path
+            history_file = Path(__file__).parent.parent / 'classify_all_history.json'
+            history = []
+            if history_file.exists():
+                try:
+                    with open(history_file, 'r') as f:
+                        history = json.load(f)
+                except Exception:
+                    history = []
+
+            top_pred = classification_data.get('output', {}).get('top_prediction', {})
+            all_preds = classification_data.get('output', {}).get('all_predictions', [])
+            meta = classification_data.get('output', {}).get('metadata', {})
+
+            record = {
+                'call_id': len(history) + 1,
+                'timestamp': datetime.utcnow().isoformat() + 'Z',
+                'top_label': top_pred.get('label', ''),
+                'top_confidence': float(top_pred.get('confidence', 0.0)),
+                'all_predictions': all_preds[:10],  # store top-10
+                'processing_time_ms': meta.get('processing_time_ms', 0),
+                'latency_s': round(latency_s, 4),
+                'device': meta.get('device', ''),
+            }
+
+            history.append(record)
+            # Keep only the last 500 records
+            if len(history) > 500:
+                history = history[-500:]
+
+            with open(history_file, 'w') as f:
+                json.dump(history, f, indent=2)
+        except Exception as e:
+            self.get_logger().warn(f'Failed to save classify_all record: {e}')
+
+    def _save_filtered_records(self, filtered_regions: list):
+        """Append /vision/classify_bbox_filtered results to classify_filtered_history.json.
+        Each region becomes one record in the format the dashboard CLIP table expects."""
+        try:
+            from pathlib import Path
+            history_file = Path(__file__).parent.parent / 'classify_filtered_history.json'
+            history = []
+            if history_file.exists():
+                try:
+                    with open(history_file, 'r') as f:
+                        history = json.load(f)
+                except Exception:
+                    history = []
+
+            timestamp = datetime.utcnow().isoformat() + 'Z'
+            call_id_base = len(history) + 1
+            for i, region in enumerate(filtered_regions):
+                history.append({
+                    'test_id': call_id_base + i,
+                    'timestamp': timestamp,
+                    'label': region['label'],
+                    'confidence': float(region['confidence']),
+                    'top1_accuracy': None,  # set by human-in-the-loop verdict
+                    'bbox': region.get('bbox', {}),
+                })
+
+            if len(history) > 1000:
+                history = history[-1000:]
+
+            with open(history_file, 'w') as f:
+                json.dump(history, f, indent=2)
+        except Exception as e:
+            self.get_logger().warn(f'Failed to save filtered records: {e}')
+
     def _classify_regions(self, rgb_image: np.ndarray, bboxes: List[List[int]]) -> Dict:
         """
         Classify multiple image regions using CLIP model

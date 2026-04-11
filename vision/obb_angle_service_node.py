@@ -42,10 +42,13 @@ from custom_interfaces.srv import FindObjectAngleBB, FindObjectAngle, DetectObje
 from custom_interfaces.msg import SAMDetections
 from sensor_msgs.msg import Image, CameraInfo
 from cv_bridge import CvBridge
+import json
 import numpy as np
 import cv2
 import time
 import threading
+from datetime import datetime
+from pathlib import Path
 
 
 class OBBAngleServiceNode(Node):
@@ -715,20 +718,34 @@ class OBBAngleServiceNode(Node):
             theta_result = np.deg2rad(angle_result_deg)
 
             # Populate response (use remapped theta, keep geometry unchanged)
+            angle_deg = angle_result_deg
             response.success = True
-            response.message = f'OBB calculated for {best_detection.object_id} within bbox [{request.x1}, {request.y1}, {request.x2}, {request.y2}]'
+            response.message = json.dumps({
+                "success": True,
+                "object_id": best_detection.object_id,
+                "input_bbox": [request.x1, request.y1, request.x2, request.y2],
+                "center": {"u": round(u, 2), "v": round(v, 2)},
+                "theta_rad": round(float(theta_result), 6),
+                "angle_deg": round(float(angle_deg), 2),
+                "width_px": round(float(width), 2),
+                "height_px": round(float(height), 2),
+                "iou_with_request": round(float(best_iou), 4),
+                "timestamp": datetime.utcnow().isoformat() + "Z",
+            })
             response.u = u
             response.v = v
             response.theta = theta_result
             response.width = width
             response.height = height
-            
+
             # Log results concisely
-            angle_deg = angle_result_deg
             self.get_logger().info('=' * 60)
             self.get_logger().info(f'OBB Result ({best_detection.object_id}): center=({u:.1f},{v:.1f}), angle={angle_deg:.1f}deg, size={width:.0f}x{height:.0f}')
             self.get_logger().info('=' * 60)
-            
+
+            # Persist to history file for dashboard
+            self._save_obb_bb_record(best_detection.object_id, request, u, v, theta_result, angle_deg, width, height, best_iou)
+
             # Queue visualization; do not block service response path.
             viz_data = [(best_detection.object_id, u, v, theta_geom, width, height, [request.x1, request.y1, request.x2, request.y2])]
             self.queue_visualization(viz_data, mode="single")
@@ -738,15 +755,50 @@ class OBBAngleServiceNode(Node):
             import traceback
             self.get_logger().error(traceback.format_exc())
             response.success = False
-            response.message = f'Internal error: {str(e)}'
+            response.message = json.dumps({"success": False, "error": str(e)})
             response.u = 0.0
             response.v = 0.0
             response.theta = 0.0
             response.width = 0.0
             response.height = 0.0
-        
+
         return response
-    
+
+    def _save_obb_bb_record(self, object_id, request, u, v, theta_rad, angle_deg, width, height, iou):
+        """Persist /obb/find_object_angle_bb result to obb_bb_history.json for the dashboard."""
+        try:
+            history_file = Path(__file__).parent.parent / 'obb_bb_history.json'
+            history = []
+            if history_file.exists():
+                try:
+                    with open(history_file, 'r') as f:
+                        history = json.load(f)
+                except Exception:
+                    history = []
+
+            record = {
+                'call_id': len(history) + 1,
+                'timestamp': datetime.utcnow().isoformat() + 'Z',
+                'object_id': object_id,
+                'input_bbox': [request.x1, request.y1, request.x2, request.y2],
+                'center_u': round(float(u), 2),
+                'center_v': round(float(v), 2),
+                'theta_rad': round(float(theta_rad), 6),
+                'angle_deg': round(float(angle_deg), 2),
+                'width_px': round(float(width), 2),
+                'height_px': round(float(height), 2),
+                'iou': round(float(iou), 4),
+            }
+
+            history.append(record)
+            if len(history) > 500:
+                history = history[-500:]
+
+            with open(history_file, 'w') as f:
+                json.dump(history, f, indent=2)
+        except Exception as e:
+            self.get_logger().warn(f'Failed to save obb_bb record: {e}')
+
     def find_object_angle_callback(self, request, response):
         """
         Service callback for /obb/find_object_angle

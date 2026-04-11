@@ -16,6 +16,10 @@ Topics Published:
 Usage:
     ros2 run vision benchmark_dashboard
     
+
+    ros2 service call /benchmark/clear_data std_srvs/srv/Trigger
+
+
     Then open browser: http://localhost:8080
 """
 
@@ -317,19 +321,11 @@ class BenchmarkDashboard(Node):
         self.data['metadata']['total_calls'] += 1
     
     def sync_from_run_history(self):
-        """Sync CLIP, GraspNet, OBB, and Pixel-to-Real data from vision_runs_history.json
-        so the /api/data endpoint (CLIP / GraspNet / Pixel-to-Real sections) stays populated
-        even when those dedicated service nodes are not running."""
+        """Sync CLIP, GraspNet, OBB, and Pixel-to-Real data from history files
+        so the /api/data endpoint stays populated even when service nodes are not running."""
         try:
             from pathlib import Path
-            history_file = Path(__file__).parent.parent / 'vision_runs_history.json'
-            if not history_file.exists():
-                return
-
-            with open(history_file, 'r') as f:
-                runs = json.load(f)
-            if not isinstance(runs, list) or not runs:
-                return
+            package_path = Path(__file__).parent.parent
 
             timestamp = datetime.now().isoformat()
 
@@ -338,6 +334,17 @@ class BenchmarkDashboard(Node):
             new_grasp  = []
             new_pixel  = []
             new_obb    = []
+
+            history_file = package_path / 'vision_runs_history.json'
+            runs = []
+            if history_file.exists():
+                try:
+                    with open(history_file, 'r') as f:
+                        data = json.load(f)
+                    if isinstance(data, list):
+                        runs = data
+                except Exception:
+                    runs = []
 
             for run in runs:
                 run_ts    = run.get('meta', {}).get('timestamp', timestamp)
@@ -416,6 +423,17 @@ class BenchmarkDashboard(Node):
                                      obj.get('bbox_x2', 0), obj.get('bbox_y2', 0)],
                         })
 
+            # Also merge records from /vision/classify_bbox_filtered direct calls
+            filtered_file = Path(__file__).parent.parent / 'classify_filtered_history.json'
+            if filtered_file.exists():
+                try:
+                    with open(filtered_file, 'r') as f:
+                        filtered_records = json.load(f)
+                    if filtered_records:
+                        new_clip = (new_clip + filtered_records)[-1000:]
+                except Exception:
+                    pass
+
             # Only update if we got new data (avoids overwriting live topic data with empty)
             if new_clip:
                 self.data['clip_classifications'] = new_clip[-1000:]
@@ -436,7 +454,7 @@ class BenchmarkDashboard(Node):
         self.data_publisher.publish(msg)
 
     def clear_data_callback(self, request, response):
-        """Clear all benchmark data"""
+        """Clear all benchmark data (in-memory + persistent JSON files)"""
         self.data = {
             'pixel_to_real': [],
             'sam_detections': [],
@@ -450,10 +468,27 @@ class BenchmarkDashboard(Node):
             }
         }
 
+        # Also wipe the persistent history files so sync_from_run_history
+        # doesn't immediately repopulate from stale data
+        package_path = Path(__file__).parent.parent
+        files_to_clear = [
+            'vision_runs_history.json',
+            'classify_filtered_history.json',
+            'classify_all_history.json',
+            'obb_bb_history.json',
+        ]
+        for fname in files_to_clear:
+            fpath = package_path / fname
+            if fpath.exists():
+                try:
+                    with open(fpath, 'w') as f:
+                        json.dump([], f)
+                except Exception as e:
+                    self.get_logger().warn(f'Could not clear {fname}: {e}')
+
         response.success = True
         response.message = "Benchmark data cleared"
-
-        self.get_logger().info('Benchmark data cleared')
+        self.get_logger().info('Benchmark data cleared (memory + files)')
         return response
     
     def start_http_server(self):
@@ -532,6 +567,21 @@ class BenchmarkDashboard(Node):
                     data = self._read_json_file(fo_file, [])
                     self._json_response(data)
 
+                elif self.path == '/api/classify-all-history':
+                    ca_file = package_path / 'classify_all_history.json'
+                    data = self._read_json_file(ca_file, [])
+                    self._json_response(data)
+
+                elif self.path == '/api/classify-filtered-history':
+                    cf_file = package_path / 'classify_filtered_history.json'
+                    data = self._read_json_file(cf_file, [])
+                    self._json_response(data)
+
+                elif self.path == '/api/obb-bb-history':
+                    obb_file = package_path / 'obb_bb_history.json'
+                    data = self._read_json_file(obb_file, [])
+                    self._json_response(data)
+
                 else:
                     super().do_GET()
 
@@ -555,8 +605,34 @@ class BenchmarkDashboard(Node):
                     self._write_json_file(fo_file, [])
                     self._json_response({'ok': True})
 
+                elif self.path == '/api/clip-verdict':
+                    self._handle_clip_verdict(payload)
+
                 else:
                     self._json_response({'error': 'unknown endpoint'}, 404)
+
+            # ── /api/clip-verdict ─────────────────────────────────────────
+            def _handle_clip_verdict(self, payload):
+                """Set human-in-the-loop top1_accuracy verdict for a CLIP record."""
+                test_id = payload.get('test_id')
+                verdict = payload.get('verdict')  # True / False
+                if test_id is None or verdict is None:
+                    self._json_response({'error': 'test_id and verdict required'}, 400)
+                    return
+
+                cf_file = package_path / 'classify_filtered_history.json'
+                history = self._read_json_file(cf_file, [])
+                updated = False
+                for entry in history:
+                    if entry.get('test_id') == test_id:
+                        entry['top1_accuracy'] = bool(verdict)
+                        updated = True
+                        break
+                if updated:
+                    self._write_json_file(cf_file, history)
+                    self._json_response({'ok': True})
+                else:
+                    self._json_response({'error': f'test_id {test_id} not found'}, 404)
 
             # ── /api/find-object ──────────────────────────────────────────
             def _handle_find_object(self, payload):
