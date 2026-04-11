@@ -37,13 +37,18 @@ import rclpy
 from rclpy.node import Node
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
+from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 from custom_interfaces.srv import FindObjectAngleBB, FindObjectAngle, DetectObjects
 from custom_interfaces.msg import SAMDetections
 from sensor_msgs.msg import Image, CameraInfo
 from cv_bridge import CvBridge
+import json
 import numpy as np
 import cv2
 import time
+import threading
+from datetime import datetime
+from pathlib import Path
 
 
 class OBBAngleServiceNode(Node):
@@ -55,8 +60,10 @@ class OBBAngleServiceNode(Node):
     def __init__(self):
         super().__init__('obb_angle_service_node')
         
-        # Use reentrant callback group for nested service calls
-        self.callback_group = ReentrantCallbackGroup()
+        # Keep subscriptions and services in separate callback groups so
+        # detection updates can be processed while service callbacks are waiting.
+        self.subscription_callback_group = ReentrantCallbackGroup()
+        self.service_callback_group = ReentrantCallbackGroup()
         
         # Storage for latest detections and images
         self.latest_detections = None
@@ -66,8 +73,13 @@ class OBBAngleServiceNode(Node):
         self.bridge = CvBridge()
         
         # Thread lock for thread-safe access
-        import threading
         self.detections_lock = threading.Lock()
+        self.detections_condition = threading.Condition(self.detections_lock)
+        self.latest_detections_stamp_ns = 0
+
+        # Queue visualization work so service callbacks can return immediately.
+        self.viz_lock = threading.Lock()
+        self.pending_viz = None
         
         # OpenCV visualization window (unified for both single and multi-object)
         self.window_name = 'OBB Angle Detection'
@@ -80,13 +92,21 @@ class OBBAngleServiceNode(Node):
             self.rgb_topic = '/camera/color/image_raw'
         else:
             self.rgb_topic = '/camera/image_raw'
+
+        # Best-effort QoS is generally more compatible with high-rate detector topics.
+        self.sam_qos = QoSProfile(
+            depth=10,
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            durability=DurabilityPolicy.VOLATILE,
+        )
         
         # Subscribe to RGB camera for visualization
         self.rgb_subscription = self.create_subscription(
             Image,
             self.rgb_topic,
             self.rgb_callback,
-            10
+            10,
+            callback_group=self.subscription_callback_group,
         )
         
         # Subscribe to SAM detections for multi-object OBB
@@ -94,7 +114,8 @@ class OBBAngleServiceNode(Node):
             SAMDetections,
             '/vision/sam_detections',
             self.sam_detections_callback,
-            10
+            self.sam_qos,
+            callback_group=self.subscription_callback_group,
         )
         
         # Subscribe to depth camera
@@ -102,7 +123,8 @@ class OBBAngleServiceNode(Node):
             Image,
             "/camera/depth/image_rect_raw",
             self.depth_callback,
-            10
+            10,
+            callback_group=self.subscription_callback_group,
         )
         
         # Subscribe to camera info
@@ -110,14 +132,15 @@ class OBBAngleServiceNode(Node):
             CameraInfo,
             "/camera/color/camera_info",
             self.info_callback,
-            10
+            10,
+            callback_group=self.subscription_callback_group,
         )
         
         # Service client for real-time detection
         self.detect_objects_client = self.create_client(
             DetectObjects,
             '/vision/detect_objects',
-            callback_group=self.callback_group
+            callback_group=self.service_callback_group
         )
         
         # Create OBB angle service servers
@@ -125,22 +148,23 @@ class OBBAngleServiceNode(Node):
             FindObjectAngleBB,
             '/obb/find_object_angle_bb',
             self.find_object_angle_bb_callback,
-            callback_group=self.callback_group
+            callback_group=self.service_callback_group
         )
         
         self.find_object_angle_srv = self.create_service(
             FindObjectAngle,
             '/obb/find_object_angle',
             self.find_object_angle_callback,
-            callback_group=self.callback_group
+            callback_group=self.service_callback_group
         )
         
         # Create OpenCV window (unified)
         cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL)
         cv2.resizeWindow(self.window_name, 1200, 800)
         
-        # Create timer for continuous window update (keeps window responsive)
-        self.viz_timer = self.create_timer(0.1, self.keep_window_alive)
+        # GUI updates are pumped from the main thread in main() to avoid
+        # HighGUI freezes under multi-threaded executors.
+        self.viz_timer = None
         
         self.get_logger().info('=' * 80)
         self.get_logger().info('OBB Angle Service Node Started')
@@ -152,6 +176,7 @@ class OBBAngleServiceNode(Node):
         self.get_logger().info('  - /obb/find_object_angle (All objects OBB)')
         self.get_logger().info('Subscriptions:')
         self.get_logger().info('  - /vision/sam_detections (SAMDetections)')
+        self.get_logger().info('  - /vision/sam_detections QoS: BEST_EFFORT, VOLATILE, depth=10')
         self.get_logger().info(f'  - {self.rgb_topic} (Image)')
         self.get_logger().info('  - /camera/depth/image_rect_raw (Image)')
         self.get_logger().info('  - /camera/color/camera_info (CameraInfo)')
@@ -177,9 +202,28 @@ class OBBAngleServiceNode(Node):
     
     def sam_detections_callback(self, msg: SAMDetections):
         """Store latest SAM detections"""
-        with self.detections_lock:
+        with self.detections_condition:
             self.latest_detections = msg
+            self.latest_detections_stamp_ns = time.monotonic_ns()
+            self.detections_condition.notify_all()
+            if not hasattr(self, '_sam_received'):
+                self._sam_received = True
+                self.get_logger().info(f'First SAM detections received: {msg.total_detections} objects')
             self.get_logger().debug(f'Received SAM detections: {msg.total_detections} objects')
+
+    def wait_for_sam_detections(self, timeout_sec=1.5, min_stamp_ns=0):
+        """Wait until at least one SAM detection message is available."""
+        deadline = time.monotonic() + timeout_sec
+        with self.detections_condition:
+            while True:
+                if self.latest_detections is not None and self.latest_detections_stamp_ns >= min_stamp_ns:
+                    return True
+
+                remaining = deadline - time.monotonic()
+                if remaining <= 0.0:
+                    return False
+
+                self.detections_condition.wait(timeout=min(0.05, remaining))
     
     def depth_callback(self, msg: Image):
         """Store latest depth image"""
@@ -194,9 +238,28 @@ class OBBAngleServiceNode(Node):
     
     def keep_window_alive(self):
         """Timer callback to keep OpenCV window responsive"""
-        # This just calls waitKey to process window events
-        # Without this, the window may freeze or not display properly
-        cv2.waitKey(1)
+        # Render queued visualization outside service callbacks to avoid
+        # blocking service responses on GUI operations.
+        pending = None
+        with self.viz_lock:
+            if self.pending_viz is not None:
+                pending = self.pending_viz
+                self.pending_viz = None
+
+        if pending is not None:
+            results, mode = pending
+            try:
+                self.visualize_obb(results, mode=mode)
+            except Exception as e:
+                self.get_logger().warn(f'Visualization update failed: {e}')
+        else:
+            # Process window events even when no new frame is queued.
+            cv2.waitKey(1)
+
+    def queue_visualization(self, results, mode="auto"):
+        """Queue the latest visualization payload for timer-based rendering."""
+        with self.viz_lock:
+            self.pending_viz = (results, mode)
     
     def calculate_obb_from_bbox(self, x1, y1, x2, y2, mask=None):
         """
@@ -341,149 +404,165 @@ class OBBAngleServiceNode(Node):
         """
         if self.latest_rgb_image is None:
             self.get_logger().warn('No RGB image available for visualization')
-            # Show a blank placeholder window
-            blank = np.zeros((800, 1200, 3), dtype=np.uint8)
-            cv2.putText(blank, "Waiting for RGB camera image...", 
-                       (300, 400), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (255, 255, 255), 3)
-            cv2.putText(blank, f"RGB Topic: {self.rgb_topic}", 
-                       (350, 450), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (128, 128, 128), 2)
+            blank = np.zeros((480, 640, 3), dtype=np.uint8)
+            cv2.putText(blank, "Waiting for RGB camera...", (80, 230),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.65, (160, 160, 160), 1)
+            cv2.putText(blank, self.rgb_topic, (80, 258),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.42, (100, 100, 100), 1)
             cv2.imshow(self.window_name, blank)
             cv2.waitKey(1)
             return
-        
+
         vis_image = self.latest_rgb_image.copy()
-        
+        img_h, img_w = vis_image.shape[:2]
+
         # Auto-detect mode
         if mode == "auto":
             mode = "single" if len(results) == 1 else "multi"
-        
-        # Color palette for objects
-        colors = [
-            (255, 255, 0),   # Cyan
-            (255, 0, 255),   # Magenta
-            (0, 255, 255),   # Yellow
-            (255, 128, 0),   # Orange
-            (128, 255, 0),   # Lime
-            (0, 255, 128),   # Spring Green
-            (255, 0, 128),   # Pink
-            (128, 0, 255),   # Purple
+
+        # Distinct color palette (BGR)
+        COLORS = [
+            (0,  200, 255),   # amber
+            (80, 255,  80),   # lime
+            (255,  80,  80),  # blue
+            (255,   0, 200),  # magenta
+            (0,  230, 230),   # yellow
+            (200,  80, 255),  # violet
+            (0,  255, 180),   # spring green
+            (255, 180,   0),  # sky blue
         ]
-        
-        # Process each OBB
+
+        def draw_corner_bracket(img, pts, color, lw=2):
+            """Draw corner-bracket accents on an OBB polygon."""
+            n = len(pts)
+            for i in range(n):
+                A = pts[(i - 1) % n].astype(float)
+                B = pts[i].astype(float)
+                C = pts[(i + 1) % n].astype(float)
+                ab = A - B;  ab_len = np.linalg.norm(ab)
+                cb = C - B;  cb_len = np.linalg.norm(cb)
+                if ab_len == 0 or cb_len == 0:
+                    continue
+                clen = max(10, int(min(ab_len, cb_len) * 0.22))
+                p1 = (B + (ab / ab_len) * clen).astype(int)
+                p2 = (B + (cb / cb_len) * clen).astype(int)
+                cv2.line(img, tuple(B.astype(int)), tuple(p1), color, lw)
+                cv2.line(img, tuple(B.astype(int)), tuple(p2), color, lw)
+
+        def semi_transparent_rect(img, x1, y1, x2, y2, fill, alpha=0.72):
+            """Blend a dark rectangle over a sub-region."""
+            x1 = max(0, x1);  y1 = max(0, y1)
+            x2 = min(img.shape[1] - 1, x2);  y2 = min(img.shape[0] - 1, y2)
+            if x2 <= x1 or y2 <= y1:
+                return
+            roi = img[y1:y2, x1:x2]
+            bg  = np.full_like(roi, fill)
+            img[y1:y2, x1:x2] = cv2.addWeighted(roi, 1 - alpha, bg, alpha, 0)
+
+        # ── Process each OBB ─────────────────────────────────────────────────
         for idx, result_tuple in enumerate(results):
-            # Unpack (handle optional bbox)
             if len(result_tuple) == 7:
                 object_id, u, v, theta, width, height, bbox = result_tuple
             else:
                 object_id, u, v, theta, width, height = result_tuple
                 bbox = None
-            
-            color = colors[idx % len(colors)]
-            
-            # Draw AABB first if provided (for single object mode)
-            if bbox is not None and mode == "single":
-                x1, y1, x2, y2 = bbox
-                cv2.rectangle(vis_image, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
-                cv2.putText(vis_image, "Input AABB", (int(x1), int(y1) - 5),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-            
-            # Get OBB corner points
-            box_points = self.get_obb_corner_points(u, v, theta, width, height)
-            
-            # Draw OBB
-            cv2.drawContours(vis_image, [box_points], 0, color, 3)
-            
-            # Draw center point
-            if mode == "single":
-                cv2.circle(vis_image, (int(u), int(v)), 8, (0, 0, 255), -1)  # Red center
-                cv2.circle(vis_image, (int(u), int(v)), 10, (255, 255, 255), 2)  # White outline
-            else:
-                cv2.circle(vis_image, (int(u), int(v)), 6, (255, 255, 255), -1)
-                cv2.circle(vis_image, (int(u), int(v)), 8, color, 2)
-            
-            # Draw angle arrow perpendicular to WIDTH (shorter dimension), with -90° offset so 0° points UP
-            arrow_length = height   # Use height (shorter dimension) for arrow length
-            # Arrow perpendicular to width = add 90° to theta, then -90° for visualization
-            visual_theta = theta + np.pi / 2 - np.pi / 2  # Perpendicular, then visualization offset
-            end_x = int(u + arrow_length * np.cos(visual_theta))
-            end_y = int(v + arrow_length * np.sin(visual_theta))
-            arrow_thickness = 3 if mode == "single" else 2
-            cv2.arrowedLine(vis_image, (int(u), int(v)), (end_x, end_y), 
-                          (255, 0, 255) if mode == "single" else color, 
-                          arrow_thickness, tipLength=0.3)
-            
-            # Draw label (use remapped angle: 90deg - original geometry angle)
+
+            color = COLORS[idx % len(COLORS)]
+            cx, cy = int(u), int(v)
             angle_geom_deg = np.rad2deg(theta)
             angle_deg = 90.0 - angle_geom_deg
-            
+
+            # ── Input AABB (single mode only) ─────────────────────────────
+            if bbox is not None and mode == "single":
+                ax1, ay1, ax2, ay2 = int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3])
+                # Dashed-style thin rectangle (draw as corner brackets only)
+                aabb_pts = np.array([[ax1,ay1],[ax2,ay1],[ax2,ay2],[ax1,ay2]])
+                draw_corner_bracket(vis_image, aabb_pts, (80, 200, 80), lw=1)
+                cv2.rectangle(vis_image, (ax1, ay1), (ax2, ay2), (80, 200, 80), 1)
+                # Small label
+                ts, _ = cv2.getTextSize("AABB", cv2.FONT_HERSHEY_SIMPLEX, 0.33, 1)
+                semi_transparent_rect(vis_image, ax1, ay1 - ts[1] - 6, ax1 + ts[0] + 4, ay1, (18, 18, 18))
+                cv2.putText(vis_image, "AABB", (ax1 + 2, ay1 - 3),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.33, (80, 200, 80), 1)
+
+            # ── OBB outline ───────────────────────────────────────────────
+            box_pts = self.get_obb_corner_points(u, v, theta, width, height)
+            # Thin full outline
+            cv2.drawContours(vis_image, [box_pts], 0, color, 1)
+            # Corner bracket accents
+            draw_corner_bracket(vis_image, box_pts, color, lw=2)
+
+            # ── Center dot ────────────────────────────────────────────────
+            cv2.circle(vis_image, (cx, cy), 5, (15, 15, 15), -1)   # dark fill
+            cv2.circle(vis_image, (cx, cy), 5, color, 2)            # color ring
+            cv2.circle(vis_image, (cx, cy), 2, (240, 240, 240), -1) # white center
+
+            # ── Angle arrow ───────────────────────────────────────────────
+            visual_theta = theta + np.pi / 2 - np.pi / 2
+            arrow_len = int(max(height * 0.55, 20))
+            end_x = int(cx + arrow_len * np.cos(visual_theta))
+            end_y = int(cy + arrow_len * np.sin(visual_theta))
+            cv2.arrowedLine(vis_image, (cx, cy), (end_x, end_y),
+                            color, 2, tipLength=0.35)
+
+            # ── Info panel (single) / compact label (multi) ───────────────
             if mode == "single":
-                # Concise info box for single object
                 info_lines = [
                     f"{object_id}",
-                    f"Center: ({int(u)}, {int(v)})",
-                    f"Angle: {angle_deg:.1f}deg",
-                    f"Size: {width:.0f}x{height:.0f}"
+                    f"Center  ({cx}, {cy})",
+                    f"Angle   {angle_deg:.1f} deg",
+                    f"Size    {width:.0f} x {height:.0f} px",
                 ]
-                
-                # Draw compact info box at top-right
-                font_scale = 0.6
-                font_thickness = 2
-                line_spacing = 25
-                
-                max_width = 0
-                for line in info_lines:
-                    (text_w, text_h), _ = cv2.getTextSize(line, cv2.FONT_HERSHEY_SIMPLEX, 
-                                                          font_scale, font_thickness)
-                    max_width = max(max_width, text_w)
-                
-                box_height = len(info_lines) * line_spacing + 15
-                box_x = vis_image.shape[1] - max_width - 25
-                box_y = 15
-                
-                # Background with transparency effect
-                overlay = vis_image.copy()
-                cv2.rectangle(overlay, (box_x - 8, box_y - 8),
-                            (box_x + max_width + 8, box_y + box_height), (0, 0, 0), -1)
-                cv2.addWeighted(overlay, 0.7, vis_image, 0.3, 0, vis_image)
-                
+                fs, ft = 0.42, 1
+                pad = 8
+                line_h = 20
+                max_w = max(cv2.getTextSize(l, cv2.FONT_HERSHEY_SIMPLEX, fs, ft)[0][0]
+                            for l in info_lines)
+                panel_w = max_w + pad * 2 + 4   # +4 for accent bar
+                panel_h = len(info_lines) * line_h + pad
+                px = img_w - panel_w - 10
+                py = 28   # sits below top bar
+
+                # Background
+                semi_transparent_rect(vis_image, px - 2, py, px + panel_w, py + panel_h, (15, 15, 15))
+                # Left accent bar
+                cv2.rectangle(vis_image, (px - 2, py), (px + 2, py + panel_h), color, -1)
                 # Border
-                cv2.rectangle(vis_image, (box_x - 8, box_y - 8),
-                            (box_x + max_width + 8, box_y + box_height), color, 2)
-                
-                # Text lines
+                cv2.rectangle(vis_image, (px - 2, py), (px + panel_w, py + panel_h), color, 1)
+
                 for i, line in enumerate(info_lines):
-                    y_pos = box_y + (i * line_spacing) + 18
-                    cv2.putText(vis_image, line, (box_x, y_pos),
-                              cv2.FONT_HERSHEY_SIMPLEX, font_scale, color, font_thickness)
+                    ty = py + pad + i * line_h + line_h // 2
+                    # Dim the label for the first line (object id) — draw in color
+                    text_color = color if i == 0 else (210, 210, 210)
+                    cv2.putText(vis_image, line, (px + 6, ty),
+                                cv2.FONT_HERSHEY_SIMPLEX, fs, text_color, ft)
             else:
-                # Compact label for multi-object
-                label = f"#{idx} {angle_deg:.1f}deg"
-                label_x = int(u + 15)
-                label_y = int(v)
-                
-                # Text with outline
-                cv2.putText(vis_image, label, (label_x, label_y),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 5)
-                cv2.putText(vis_image, label, (label_x, label_y),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
-        
-        # Add concise title
-        if mode == "single":
-            title = "OBB Detection"
-        else:
-            title = f"OBB Detection ({len(results)} objects)"
-        
-        cv2.putText(vis_image, title, (10, 35), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 3)
-        cv2.putText(vis_image, title, (10, 35), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 255), 2)
-        
-        # Add concise legend at bottom
-        legend_y = vis_image.shape[0] - 20
-        legend_text = "0deg = Vertical | Range: -90deg to +90deg"
-        
-        cv2.putText(vis_image, legend_text, (10, legend_y),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
-        
-        # Display
+                # Compact floating label near center
+                label = f"#{idx}  {angle_deg:.1f}°"
+                fs, ft = 0.38, 1
+                (lw_px, lh_px), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, fs, ft)
+                pad = 4
+                lx = cx + 12
+                ly = cy - 6
+                # Clamp
+                lx = min(lx, img_w - lw_px - pad * 2 - 5)
+                ly = max(ly, lh_px + pad + 2)
+
+                semi_transparent_rect(vis_image, lx - 2, ly - lh_px - pad,
+                                      lx + lw_px + pad * 2 + 3, ly + pad, (15, 15, 15))
+                cv2.rectangle(vis_image, (lx - 2, ly - lh_px - pad),
+                              (lx + 3, ly + pad), color, -1)  # accent bar
+                cv2.putText(vis_image, label, (lx + 5, ly),
+                            cv2.FONT_HERSHEY_SIMPLEX, fs, (230, 230, 230), ft)
+
+        # ── Top info bar ─────────────────────────────────────────────────────
+        bar_h = 24
+        obj_count = len(results)
+        title = f"OBB Detection  |  Objects: {obj_count}  |  0 deg = Vertical"
+        semi_transparent_rect(vis_image, 0, 0, img_w, bar_h, (12, 12, 12), alpha=0.78)
+        cv2.putText(vis_image, title, (8, 16),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.42, (210, 210, 210), 1)
+
         cv2.imshow(self.window_name, vis_image)
         cv2.waitKey(1)
         
@@ -552,11 +631,15 @@ class OBBAngleServiceNode(Node):
                 return response
             
             # Trigger real-time detection to get fresh detections
+            request_stamp_ns = time.monotonic_ns()
             self.get_logger().info('Triggering real-time detection...')
             detection_success = self.trigger_real_time_detection()
-            
-            # Small delay to ensure detections are updated
-            time.sleep(0.1)
+            min_stamp_ns = request_stamp_ns if detection_success else 0
+
+            # Wait for SAM callback instead of fixed sleep.
+            got_sam = self.wait_for_sam_detections(timeout_sec=1.5, min_stamp_ns=min_stamp_ns)
+            if not got_sam:
+                self.get_logger().warn('Timed out waiting for SAM detections update')
             
             # Get latest detections
             with self.detections_lock:
@@ -635,38 +718,87 @@ class OBBAngleServiceNode(Node):
             theta_result = np.deg2rad(angle_result_deg)
 
             # Populate response (use remapped theta, keep geometry unchanged)
+            angle_deg = angle_result_deg
             response.success = True
-            response.message = f'OBB calculated for {best_detection.object_id} within bbox [{request.x1}, {request.y1}, {request.x2}, {request.y2}]'
+            response.message = json.dumps({
+                "success": True,
+                "object_id": best_detection.object_id,
+                "input_bbox": [request.x1, request.y1, request.x2, request.y2],
+                "center": {"u": round(u, 2), "v": round(v, 2)},
+                "theta_rad": round(float(theta_result), 6),
+                "angle_deg": round(float(angle_deg), 2),
+                "width_px": round(float(width), 2),
+                "height_px": round(float(height), 2),
+                "iou_with_request": round(float(best_iou), 4),
+                "timestamp": datetime.utcnow().isoformat() + "Z",
+            })
             response.u = u
             response.v = v
             response.theta = theta_result
             response.width = width
             response.height = height
-            
+
             # Log results concisely
-            angle_deg = angle_result_deg
             self.get_logger().info('=' * 60)
             self.get_logger().info(f'OBB Result ({best_detection.object_id}): center=({u:.1f},{v:.1f}), angle={angle_deg:.1f}deg, size={width:.0f}x{height:.0f}')
             self.get_logger().info('=' * 60)
-            
-            # Visualize with unified function - pass the INPUT bbox from request for visualization
+
+            # Persist to history file for dashboard
+            self._save_obb_bb_record(best_detection.object_id, request, u, v, theta_result, angle_deg, width, height, best_iou)
+
+            # Queue visualization; do not block service response path.
             viz_data = [(best_detection.object_id, u, v, theta_geom, width, height, [request.x1, request.y1, request.x2, request.y2])]
-            self.visualize_obb(viz_data, mode="single")
+            self.queue_visualization(viz_data, mode="single")
             
         except Exception as e:
             self.get_logger().error(f'Error in find_object_angle_bb: {e}')
             import traceback
             self.get_logger().error(traceback.format_exc())
             response.success = False
-            response.message = f'Internal error: {str(e)}'
+            response.message = json.dumps({"success": False, "error": str(e)})
             response.u = 0.0
             response.v = 0.0
             response.theta = 0.0
             response.width = 0.0
             response.height = 0.0
-        
+
         return response
-    
+
+    def _save_obb_bb_record(self, object_id, request, u, v, theta_rad, angle_deg, width, height, iou):
+        """Persist /obb/find_object_angle_bb result to obb_bb_history.json for the dashboard."""
+        try:
+            history_file = Path(__file__).parent.parent / 'obb_bb_history.json'
+            history = []
+            if history_file.exists():
+                try:
+                    with open(history_file, 'r') as f:
+                        history = json.load(f)
+                except Exception:
+                    history = []
+
+            record = {
+                'call_id': len(history) + 1,
+                'timestamp': datetime.utcnow().isoformat() + 'Z',
+                'object_id': object_id,
+                'input_bbox': [request.x1, request.y1, request.x2, request.y2],
+                'center_u': round(float(u), 2),
+                'center_v': round(float(v), 2),
+                'theta_rad': round(float(theta_rad), 6),
+                'angle_deg': round(float(angle_deg), 2),
+                'width_px': round(float(width), 2),
+                'height_px': round(float(height), 2),
+                'iou': round(float(iou), 4),
+            }
+
+            history.append(record)
+            if len(history) > 500:
+                history = history[-500:]
+
+            with open(history_file, 'w') as f:
+                json.dump(history, f, indent=2)
+        except Exception as e:
+            self.get_logger().warn(f'Failed to save obb_bb record: {e}')
+
     def find_object_angle_callback(self, request, response):
         """
         Service callback for /obb/find_object_angle
@@ -678,11 +810,15 @@ class OBBAngleServiceNode(Node):
         
         try:
             # Trigger real-time detection
+            request_stamp_ns = time.monotonic_ns()
             self.get_logger().info('Triggering real-time detection for all objects...')
             detection_success = self.trigger_real_time_detection()
-            
-            # Small delay to ensure detections are updated
-            time.sleep(0.1)
+            min_stamp_ns = request_stamp_ns if detection_success else 0
+
+            # Wait for SAM callback instead of fixed sleep.
+            got_sam = self.wait_for_sam_detections(timeout_sec=1.5, min_stamp_ns=min_stamp_ns)
+            if not got_sam:
+                self.get_logger().warn('Timed out waiting for SAM detections update')
             
             # Get latest detections
             with self.detections_lock:
@@ -791,7 +927,7 @@ class OBBAngleServiceNode(Node):
             
             # Visualize all objects with unified function
             if len(viz_results) > 0:
-                self.visualize_obb(viz_results, mode="multi")
+                self.queue_visualization(viz_results, mode="multi")
             
         except Exception as e:
             self.get_logger().error(f'Error in find_object_angle: {e}')
@@ -822,15 +958,18 @@ def main(args=None):
     node = OBBAngleServiceNode()
     
     # Use MultiThreadedExecutor for non-blocking service calls
-    executor = MultiThreadedExecutor()
+    executor = MultiThreadedExecutor(num_threads=4)
     executor.add_node(node)
     
     try:
         node.get_logger().info('OBB Angle Service Node spinning...')
-        executor.spin()
+        while rclpy.ok():
+            executor.spin_once(timeout_sec=0.03)
+            node.keep_window_alive()
     except KeyboardInterrupt:
         node.get_logger().info('Shutting down OBB Angle Service Node...')
     finally:
+        executor.shutdown()
         cv2.destroyAllWindows()
         node.destroy_node()
         rclpy.shutdown()

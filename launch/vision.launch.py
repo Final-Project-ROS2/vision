@@ -42,4 +42,13 @@ def generate_launch_description():
     )
     ld.add_action(scene_understanding_node)
 
+    benchmark_dashboard_node = Node(
+        package='vision',
+        executable='benchmark_dashboard',
+        name='benchmark_dashboard_node',
+        output='screen',
+        emulate_tty=True
+    )
+    ld.add_action(benchmark_dashboard_node)
+
     return ld

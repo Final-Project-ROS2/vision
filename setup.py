@@ -47,6 +47,7 @@ setup(
         'scipy>=1.11.0',
         'scikit-learn>=1.3.0',
         'pandas>=2.0.0',
+        'openpyxl>=3.1.0',
         'tqdm>=4.66.0',
         'jsonschema>=4.19.0',
     ],
@@ -58,6 +59,7 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
+            'collect_and_export = vision_scripts.collect_and_export:main',
             'simple_sam_detector = vision.simple_sam_detector:main',
             'clip_classifier = vision.clip_classifier:main',
             'sam_clip_pipeline = vision.sam_clip_pipeline:main',
@@ -74,7 +76,7 @@ setup(
             'find_boundary_service = vision.find_boundary_service_node:main',
             'find_multi_object = vision.find_multi_object:main',
             # 'calibrate = calibration.calibrate:main',
-            # 'benchmark_dashboard = vision.benchmark_dashboard:main',
+             'benchmark_dashboard = vision.benchmark_dashboard:main',
             # 'show_rgb_image = vision.show_rgb_image_node:main',
             # 'show_depth_image = vision.show_depth_image_node:main',
             # 'sam_vision_pipeline = vision.sam_vision_pipeline_node:main',
