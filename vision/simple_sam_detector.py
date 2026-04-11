@@ -689,14 +689,17 @@ class SimpleSAMDetector(Node):
                 clip_info = clip_classifications.get(idx)
                 
                 if clip_info:
-                    # Use CLIP label and confidence
+                    # Confidence = CLIP softmax probability over candidate labels [0, 1]
                     object_ids.append(f"{clip_info['label']}_{idx}")
                     confidences.append(float(clip_info['confidence']))
                     self.get_logger().info(f"  Region {idx}: {clip_info['label']} (CLIP confidence: {clip_info['confidence']:.2f})")
                 else:
-                    # Use SAM generic label
+                    # No CLIP result — fall back to SAM shape score (circularity-based,
+                    # range [0.50, 0.95]).  This is NOT a semantic confidence; it only
+                    # reflects contour regularity.
                     object_ids.append(det['id'])
                     confidences.append(float(det['confidence']))
+                    self.get_logger().debug(f"  Region {idx}: no CLIP result, using SAM shape score={det['confidence']:.2f}")
                 
                 bbox = det['bbox']
                 bbox_x1.append(bbox[0])
@@ -1104,12 +1107,17 @@ class SimpleSAMDetector(Node):
             mask = np.zeros((h, w), dtype=np.uint8)
             cv2.drawContours(mask, [contour], -1, 255, -1)
             
-            # Calculate confidence based on contour properties
+            # Shape-based segmentation score (NOT a model prediction probability).
+            # Circularity (4π·area / perimeter²) measures how "blob-like" the
+            # contour is: 1.0 = perfect circle, <1.0 = irregular shape.
+            # Score range: [0.50, 0.95].  This is used as a proxy for
+            # segmentation quality when no model IoU score is available.
+            # Downstream consumers should treat this as `sam_shape_score`,
+            # NOT as a semantic classification confidence.
             perimeter = cv2.arcLength(contour, True)
             circularity = 4 * np.pi * area / (perimeter * perimeter) if perimeter > 0 else 0
-            confidence = min(0.95, 0.50 + circularity * 0.45)  # More lenient baseline
-            
-            # Relaxed confidence threshold (was 0.4, now 0.3)
+            confidence = min(0.95, 0.50 + circularity * 0.45)
+
             if confidence <= 0.3:
                 continue
             

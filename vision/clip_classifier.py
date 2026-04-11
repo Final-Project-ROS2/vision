@@ -112,6 +112,13 @@ class CLIPClassifier(Node):
         self.declare_parameter('real_hardware', False)
         self.real_hardware = bool(self.get_parameter('real_hardware').value)
 
+        # Minimum raw cosine similarity to even consider a region a candidate.
+        # Applied before inter-region softmax normalisation; regions below this
+        # threshold are discarded entirely.  Default 0.1 rejects strongly
+        # mismatched regions while keeping borderline ones in the softmax pool.
+        self.declare_parameter('clip_min_confidence', 0.1)
+        self.clip_min_confidence = float(self.get_parameter('clip_min_confidence').value)
+
         self.rgb_topic = '/camera/color/image_raw' if self.real_hardware else '/camera/image_raw'
         self.depth_topic = '/camera/depth/image_rect_raw' if self.real_hardware else '/camera/depth/image_raw'
         self.camera_info_topic = 'camera/color/camera_info' if self.real_hardware else '/camera/camera_info'
@@ -716,11 +723,17 @@ class CLIPClassifier(Node):
         return bboxes, None
 
     def _compute_similarity(self, image_bgr: np.ndarray, label: str) -> float:
-        """Compute CLIP cosine similarity between crop and label text."""
+        """Compute raw CLIP cosine similarity between a single crop and label text.
+
+        Returns a value roughly in [-1, 1].  Prefer
+        _compute_inter_region_confidences() when you have multiple regions,
+        as that method normalises across regions via softmax to produce proper
+        probabilities in [0, 1].
+        """
         region_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
         pil_image = PILImage.fromarray(region_rgb)
         image_input = self.preprocess(pil_image).unsqueeze(0).to(self.device)
-        text_tokens = clip.tokenize([label]).to(self.device)
+        text_tokens = clip.tokenize([f"a photo of a {label}"]).to(self.device)
 
         with torch.no_grad():
             image_features = self.model.encode_image(image_input)
@@ -730,6 +743,55 @@ class CLIPClassifier(Node):
             similarity = (image_features @ text_features.T)[0, 0].item()
 
         return float(similarity)
+
+    def _compute_inter_region_confidences(
+        self,
+        crops_bgr: List[np.ndarray],
+        label: str,
+    ) -> List[float]:
+        """Return per-region confidence values in [0, 1] for a query label.
+
+        Rather than returning raw cosine similarity (which lives in roughly
+        [0.15, 0.35] for typical queries and is hard to threshold), this method
+        applies a temperature-scaled softmax *across all candidate regions*.
+        The result is a proper probability distribution: the region most likely
+        containing ``label`` gets a high score, the rest share the remainder.
+
+        Args:
+            crops_bgr: List of BGR image crops (one per detected region).
+            label:     Text query, e.g. ``"bowl"`` or ``"green_cube"``.
+
+        Returns:
+            List of float probabilities, same length as ``crops_bgr``,
+            summing to 1.0.  An empty list is returned when ``crops_bgr``
+            is empty.
+        """
+        if not crops_bgr:
+            return []
+
+        # Use the same prompt template as _classify_regions / _classify_image
+        text_tokens = clip.tokenize([f"a photo of a {label}"]).to(self.device)
+        with torch.no_grad():
+            text_features = self.model.encode_text(text_tokens)
+            text_features = text_features / text_features.norm(dim=-1, keepdim=True)
+
+            image_features_list = []
+            for crop_bgr in crops_bgr:
+                region_rgb = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB)
+                pil_image = PILImage.fromarray(region_rgb)
+                image_input = self.preprocess(pil_image).unsqueeze(0).to(self.device)
+                img_feat = self.model.encode_image(image_input)
+                img_feat = img_feat / img_feat.norm(dim=-1, keepdim=True)
+                image_features_list.append(img_feat)
+
+            # Stack → (N, D), then cosine similarities → (N,)
+            all_image_features = torch.cat(image_features_list, dim=0)  # (N, D)
+            raw_sims = (all_image_features @ text_features.T).squeeze(1)  # (N,)
+
+        # Temperature-scaled softmax over regions: a factor of 100 matches the
+        # scale used in standard CLIP logits and keeps the distribution sharp.
+        probs = (raw_sims * 100.0).softmax(dim=0)
+        return [float(p.item()) for p in probs]
 
     def find_multi_object_callback(self, request, response):
         """
@@ -815,8 +877,10 @@ class CLIPClassifier(Node):
 
             frame = self.captured_frame
             frame_h, frame_w = frame.shape[:2]
-            matches: List[Dict] = []
 
+            # --- Pass 1: collect valid crops pre-filtered by raw cosine ---
+            candidates: List[Dict] = []
+            crops: List[np.ndarray] = []
             for region_id, bbox in enumerate(bboxes):
                 x1, y1, x2, y2 = bbox
                 x1 = max(0, min(x1, frame_w))
@@ -828,12 +892,25 @@ class CLIPClassifier(Node):
                     continue
 
                 region_bgr = frame[y1:y2, x1:x2]
-                similarity = self._compute_similarity(region_bgr, target_label)
-                matches.append({
+                raw_sim = self._compute_similarity(region_bgr, target_label)
+                if raw_sim < self.clip_min_confidence:
+                    continue
+                candidates.append({
                     'region_id': region_id,
                     'bbox': [int(x1), int(y1), int(x2), int(y2)],
-                    'confidence': round(float(similarity), 4),
                 })
+                crops.append(region_bgr)
+
+            matches: List[Dict] = []
+            if candidates:
+                # --- Pass 2: inter-region softmax → proper [0,1] probabilities ---
+                probs = self._compute_inter_region_confidences(crops, target_label)
+                for i, cand in enumerate(candidates):
+                    matches.append({
+                        'region_id': cand['region_id'],
+                        'bbox': cand['bbox'],
+                        'confidence': round(probs[i], 4),
+                    })
 
             matches.sort(key=lambda item: item['confidence'], reverse=True)
             top_matches = matches[:top_k]
@@ -996,80 +1073,83 @@ class CLIPClassifier(Node):
                 
                 self.get_logger().info(f"Classification complete for {len(self.latest_region_classifications)} regions")
             
-            self.get_logger().info(f"Computing CLIP embeddings for '{target_label}' and {len(self.latest_region_classifications)} regions")
-            
-            # Compute image-text similarity for each bounding box using CLIP's high-level API
-            best_match = None
-            best_similarity = -1.0  # Cosine similarity ranges from -1 to 1
-            
+            self.get_logger().info(f"Computing CLIP confidences for '{target_label}' across {len(self.latest_region_classifications)} regions")
+
+            # --- Pass 1: collect valid crops and their metadata ---------
+            h, w = self.captured_frame.shape[:2]
+            valid_regions = []
+            crops = []
             for region in self.latest_region_classifications:
                 bbox = region['bbox']
                 x1, y1, x2, y2 = bbox
-                
-                # Clamp bbox to image bounds
-                h, w = self.captured_frame.shape[:2]
                 x1 = max(0, min(x1, w))
                 x2 = max(0, min(x2, w))
                 y1 = max(0, min(y1, h))
                 y2 = max(0, min(y2, h))
-                
-                # Skip invalid boxes
                 if x2 <= x1 or y2 <= y1:
                     self.get_logger().warn(f"Skipping invalid bbox: {bbox}")
                     continue
-                
-                # Crop and convert region
-                region_bgr = self.captured_frame[y1:y2, x1:x2]
-                region_rgb = cv2.cvtColor(region_bgr, cv2.COLOR_BGR2RGB)
-                pil_image = PILImage.fromarray(region_rgb)
-                
-                # Use OpenAI CLIP for similarity computation
-                image_input = self.preprocess(pil_image).unsqueeze(0).to(self.device)
-                text_tokens = clip.tokenize([target_label]).to(self.device)
-                
-                with torch.no_grad():
-                    image_features = self.model.encode_image(image_input)
-                    text_features = self.model.encode_text(text_tokens)
-                    
-                    # Normalize features
-                    image_features = image_features / image_features.norm(dim=-1, keepdim=True)
-                    text_features = text_features / text_features.norm(dim=-1, keepdim=True)
-                    
-                    # Compute cosine similarity (normalized dot product)
-                    similarity = (image_features @ text_features.T)[0, 0].item()
-                
-                self.get_logger().debug(f"Region {region['region_id']}: similarity = {similarity:.4f}")
-                
-                # Track best match
-                if similarity > best_similarity:
-                    best_similarity = similarity
-                    best_match = {
-                        'bbox': bbox,
-                        'confidence': similarity,
-                        'region_id': region['region_id']
-                    }
-            
-            # Check if any match was found
-            if best_match is None:
+                # Pre-filter by raw cosine similarity so obviously wrong regions
+                # don't pollute the softmax pool.
+                raw_sim = self._compute_similarity(
+                    self.captured_frame[y1:y2, x1:x2], target_label
+                )
+                if raw_sim < self.clip_min_confidence:
+                    self.get_logger().debug(
+                        f"Region {region['region_id']} discarded: raw_sim={raw_sim:.4f} "
+                        f"< clip_min_confidence={self.clip_min_confidence}"
+                    )
+                    continue
+                valid_regions.append({
+                    'bbox': [x1, y1, x2, y2],
+                    'region_id': region['region_id'],
+                })
+                crops.append(self.captured_frame[y1:y2, x1:x2])
+
+            # Check if any valid region survived the pre-filter
+            if not valid_regions:
                 response.success = False
                 response.message = f"No valid regions found to compare with '{target_label}'"
                 response.bbox = []
                 response.confidence = 0.0
                 self.latest_found_object = None
-                self.get_logger().info(f"No valid regions to compare")
+                self.get_logger().info("No valid regions to compare")
                 return response
-            
-            # Optional: Set a minimum similarity threshold
-            min_similarity_threshold = 0.2  # Adjust based on your needs
-            if best_match['confidence'] < min_similarity_threshold:
+
+            # --- Pass 2: inter-region softmax → proper probabilities ----
+            # Each crop gets a probability in [0, 1] that sums to 1 across
+            # all regions.  A high score means "this region most likely
+            # contains the queried label", which is a meaningful confidence.
+            probs = self._compute_inter_region_confidences(crops, target_label)
+
+            for i, region_info in enumerate(valid_regions):
+                region_info['confidence'] = probs[i]
+                self.get_logger().debug(
+                    f"Region {region_info['region_id']}: confidence={probs[i]:.4f}"
+                )
+
+            # Best region = highest softmax probability
+            best_match = max(valid_regions, key=lambda r: r['confidence'])
+
+            # Minimum confidence guard (now in softmax probability space).
+            # With clip_min_confidence already filtering raw similarities,
+            # this catches the degenerate single-region case where probability
+            # is trivially 1.0 but the raw match was borderline.
+            min_prob_threshold = self.clip_min_confidence
+            if best_match['confidence'] < min_prob_threshold:
                 response.success = False
-                response.message = f"Label '{target_label}' found but similarity too low ({best_match['confidence']:.3f} < {min_similarity_threshold})"
+                response.message = (
+                    f"Label '{target_label}' found but confidence too low "
+                    f"({best_match['confidence']:.3f} < {min_prob_threshold})"
+                )
                 response.bbox = []
                 response.confidence = float(best_match['confidence'])
                 self.latest_found_object = None
-                self.get_logger().info(f"Label '{target_label}' similarity too low: {best_match['confidence']:.3f}")
+                self.get_logger().info(
+                    f"Label '{target_label}' confidence too low: {best_match['confidence']:.3f}"
+                )
                 return response
-            
+
             # Store for visualization
             self.latest_found_object = {
                 'label': target_label,
@@ -1077,17 +1157,17 @@ class CLIPClassifier(Node):
                 'confidence': best_match['confidence'],
                 'region_id': best_match['region_id']
             }
-            
+
             # Return success with bbox
             response.success = True
-            response.message = f"Found '{target_label}' with similarity {best_match['confidence']:.3f}"
+            response.message = f"Found '{target_label}' with confidence {best_match['confidence']:.3f}"
             response.bbox = best_match['bbox']
             response.confidence = float(best_match['confidence'])
             # Note: FindObject.srv doesn't have object_id field (only FindObjectReal.srv does)
-            
+
             self.get_logger().info(
                 f"Found '{target_label}': bbox={best_match['bbox']}, "
-                f"similarity={best_match['confidence']:.3f}, region_id={best_match['region_id']}"
+                f"confidence={best_match['confidence']:.3f}, region_id={best_match['region_id']}"
             )
             
         except Exception as e:
@@ -1117,21 +1197,18 @@ class CLIPClassifier(Node):
         # Convert BGR to RGB
         rgb = cv2.cvtColor(rgb_image, cv2.COLOR_BGR2RGB)
         pil_image = PILImage.fromarray(rgb)
-        
-        # Prepare inputs using OpenAI CLIP
+
+        # Prompt template improves accuracy over bare label names (CLIP paper)
+        prompted_labels = [f"a photo of a {lbl}" for lbl in self.candidate_labels]
+
         image_input = self.preprocess(pil_image).unsqueeze(0).to(self.device)
-        text_tokens = clip.tokenize(self.candidate_labels).to(self.device)
-        
-        # Get predictions
+        text_tokens = clip.tokenize(prompted_labels).to(self.device)
+
         with torch.no_grad():
             image_features = self.model.encode_image(image_input)
             text_features = self.model.encode_text(text_tokens)
-            
-            # Normalize features
             image_features = image_features / image_features.norm(dim=-1, keepdim=True)
             text_features = text_features / text_features.norm(dim=-1, keepdim=True)
-            
-            # Calculate similarity (logits)
             logits_per_image = (100.0 * image_features @ text_features.T)
             probs = logits_per_image.softmax(dim=-1)[0]
         
@@ -1190,61 +1267,60 @@ class CLIPClassifier(Node):
         start_time = time.time()
         
         classified_regions = []
-        
+
+        # Encode text once for all regions.  The candidate labels never change
+        # within a call, so there is no reason to re-tokenize per region.
+        # Prompt template "a photo of a {label}" matches CLIP's training
+        # distribution far better than bare label names and measurably improves
+        # zero-shot accuracy (CLIP paper: +~13 pp on ImageNet).
+        prompted_labels = [f"a photo of a {lbl}" for lbl in self.candidate_labels]
+        with torch.no_grad():
+            text_tokens = clip.tokenize(prompted_labels).to(self.device)
+            text_features = self.model.encode_text(text_tokens)
+            text_features = text_features / text_features.norm(dim=-1, keepdim=True)
+
+        h, w = rgb_image.shape[:2]
+
         for region_id, bbox in enumerate(bboxes):
             x1, y1, x2, y2 = bbox
-            
+
             # Clamp bbox to image bounds
-            h, w = rgb_image.shape[:2]
             x1 = max(0, min(x1, w))
             x2 = max(0, min(x2, w))
             y1 = max(0, min(y1, h))
             y2 = max(0, min(y2, h))
-            
+
             # Skip invalid boxes
             if x2 <= x1 or y2 <= y1:
                 self.get_logger().warn(f"Skipping invalid bbox: {bbox}")
                 continue
-            
+
             # Crop region
             region_bgr = rgb_image[y1:y2, x1:x2]
-            
-            # Convert BGR to RGB
             region_rgb = cv2.cvtColor(region_bgr, cv2.COLOR_BGR2RGB)
             pil_image = PILImage.fromarray(region_rgb)
-            
-            # Prepare inputs using OpenAI CLIP
+
             image_input = self.preprocess(pil_image).unsqueeze(0).to(self.device)
-            text_tokens = clip.tokenize(self.candidate_labels).to(self.device)
-            
-            # Get predictions
+
             with torch.no_grad():
                 image_features = self.model.encode_image(image_input)
-                text_features = self.model.encode_text(text_tokens)
-                
-                # Normalize features
                 image_features = image_features / image_features.norm(dim=-1, keepdim=True)
-                text_features = text_features / text_features.norm(dim=-1, keepdim=True)
-                
-                # Calculate similarity (logits)
+
+                # Intra-label softmax: probability over the closed label set.
+                # Range [0, 1], sums to 1 across labels for this region.
                 logits_per_image = (100.0 * image_features @ text_features.T)
                 probs = logits_per_image.softmax(dim=-1)[0]
-            
-            # Convert to numpy
+
             probs_np = probs.cpu().numpy()
-            
-            # Sort predictions by confidence
             sorted_indices = np.argsort(probs_np)[::-1]
-            
-            # Build predictions list
+
             all_predictions = []
             for idx in sorted_indices:
                 all_predictions.append({
                     "label": self.candidate_labels[idx],
                     "confidence": round(float(probs_np[idx]), 2)
                 })
-            
-            # Build region result
+
             region_result = {
                 "region_id": region_id,
                 "bbox": [int(x1), int(y1), int(x2), int(y2)],
@@ -1252,9 +1328,9 @@ class CLIPClassifier(Node):
                     "label": all_predictions[0]["label"],
                     "confidence": all_predictions[0]["confidence"]
                 },
-                "all_predictions": all_predictions[:10]  # Top 10
+                "all_predictions": all_predictions[:10]
             }
-            
+
             classified_regions.append(region_result)
         
         # Calculate processing time

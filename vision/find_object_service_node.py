@@ -9,6 +9,10 @@ from custom_interfaces.srv import DetectObjects, FindObject, PixelToReal, FindOb
 ros2 service call /find_object custom_interfaces/srv/FindObjectReal "{label: 'bowl'}"
 
 confidence calculate by SAM detection based
+
+json file kept at
+/home/group11/final_project_ws/install/vision/lib/python3.12/site-packages/find_object_history.json
+
 """
 
 # TCP_OFFSET = 0.157 # Actual TCP_OFFSET value from teach pendant
@@ -22,6 +26,10 @@ class FindObjectServiceNode(Node):
         # Parameter toggles tcp offset
         self.declare_parameter('tcp_offset', False)
         self.tcp_offset = bool(self.get_parameter('tcp_offset').value)
+        
+        # Minimum confidence threshold for find_object responses
+        self.declare_parameter('find_object_min_confidence', 0.255)
+        self.find_object_min_confidence = float(self.get_parameter('find_object_min_confidence').value)
         
         # Use reentrant callback group to allow nested service calls
         self.callback_group = ReentrantCallbackGroup()
@@ -206,6 +214,26 @@ class FindObjectServiceNode(Node):
                 response.y = 0.0
                 response.z = 0.0
                 response.theta = 0.0
+                return response
+
+            if find_response.confidence < self.find_object_min_confidence:
+                response.success = False
+                response.message = (
+                    f'Object confidence too low ({find_response.confidence:.3f} < '
+                    f'{self.find_object_min_confidence:.3f}); cannot reliably find object in camera'
+                )
+                response.object_id = ''
+                response.bbox = []
+                response.confidence = float(find_response.confidence)
+                response.x = 0.0
+                response.y = 0.0
+                response.z = 0.0
+                response.theta = 0.0
+                self.get_logger().warn(
+                    f'find_object confidence below threshold: {find_response.confidence:.3f} '
+                    f'(threshold={self.find_object_min_confidence:.3f})'
+                )
+                self._log_find_object_call(label, response)
                 return response
             
             # Extract object_id from find_response

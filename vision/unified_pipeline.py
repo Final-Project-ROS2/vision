@@ -287,7 +287,10 @@ class UnifiedPipelineNode(Node):
                 clip_map[region_id] = {
                     "label": region.get('label'),
                     "confidence": float(region.get('confidence', 0.0)),
-                    "is_top1_accurate": region.get('confidence', 0.0) >= 0.5  # Top-1 if confidence >= 0.5
+                    # confidence here is a softmax probability over candidate labels.
+                    # >= 0.5 means the model assigns more probability to this label
+                    # than to all other candidates combined — a high-precision bar.
+                    "is_top1_accurate": region.get('confidence', 0.0) >= 0.5
                 }
             
             return clip_map
