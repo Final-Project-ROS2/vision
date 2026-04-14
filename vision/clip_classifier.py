@@ -53,6 +53,7 @@ import numpy as np
 import sys
 import json
 import base64
+import os
 from datetime import datetime
 from typing import List, Dict, Tuple, Optional
 import time
@@ -193,6 +194,9 @@ class CLIPClassifier(Node):
         self.declare_parameter('vlm_selection_min_confidence', 0.25)
         self.declare_parameter('vlm_verify_min_confidence', 0.30)
         self.declare_parameter('find_object_max_regions', 12)
+        self.declare_parameter('find_object_debug_dump_enabled', False)
+        self.declare_parameter('find_object_debug_dump_dir', '/tmp/vision_find_object_debug')
+        self.declare_parameter('find_object_log_timing', True)
 
         self.find_object_mode = str(self.get_parameter('find_object_mode').value).lower()
         self.vlm_model = str(self.get_parameter('vlm_model').value)
@@ -201,6 +205,9 @@ class CLIPClassifier(Node):
         self.vlm_selection_min_confidence = float(self.get_parameter('vlm_selection_min_confidence').value)
         self.vlm_verify_min_confidence = float(self.get_parameter('vlm_verify_min_confidence').value)
         self.find_object_max_regions = int(self.get_parameter('find_object_max_regions').value)
+        self.find_object_debug_dump_enabled = bool(self.get_parameter('find_object_debug_dump_enabled').value)
+        self.find_object_debug_dump_dir = str(self.get_parameter('find_object_debug_dump_dir').value)
+        self.find_object_log_timing = bool(self.get_parameter('find_object_log_timing').value)
         
         # CLIP model
         self.model = None
@@ -322,6 +329,11 @@ class CLIPClassifier(Node):
         self.get_logger().info(
             "Find object mode: "
             f"{self.find_object_mode} (vlm_model={self.vlm_model}, ollama_host={self.ollama_host})"
+        )
+        self.get_logger().info(
+            "Find object debug: "
+            f"dump_enabled={self.find_object_debug_dump_enabled}, "
+            f"dump_dir={self.find_object_debug_dump_dir}, timing={self.find_object_log_timing}"
         )
         self.get_logger().info(f"Subscriber: /vision/sam_detections (auto-classify on SAM publish)")
         self.get_logger().info(f"OpenCV Window: '{self.window_name}'")
@@ -832,6 +844,46 @@ class CLIPClassifier(Node):
             raise ValueError('No JSON object found in VLM response')
         return json.loads(text[start:end + 1])
 
+    def _log_find_object_timing(self, label: str, mode: str, outcome: str, stage_ms: Dict[str, float]) -> None:
+        """Log structured timing info for /vision/find_object request."""
+        if not self.find_object_log_timing:
+            return
+        self.get_logger().info(
+            f"[find_object_timing] label='{label}' mode={mode} outcome={outcome} stages_ms={json.dumps(stage_ms, sort_keys=True)}"
+        )
+
+    def _maybe_dump_find_object_debug(
+        self,
+        target_label: str,
+        mode: str,
+        outcome: str,
+        annotated_bgr: Optional[np.ndarray] = None,
+        crop_bgr: Optional[np.ndarray] = None,
+        metadata: Optional[Dict] = None,
+    ) -> None:
+        """Optionally save annotated and crop debug images for find_object requests."""
+        if not self.find_object_debug_dump_enabled:
+            return
+        try:
+            os.makedirs(self.find_object_debug_dump_dir, exist_ok=True)
+            ts = datetime.utcnow().strftime('%Y%m%dT%H%M%S_%fZ')
+            safe_label = ''.join(ch if ch.isalnum() or ch in ('-', '_') else '_' for ch in target_label)
+            base_name = f"{ts}_{mode}_{outcome}_{safe_label}"[:180]
+
+            if annotated_bgr is not None:
+                annotated_path = os.path.join(self.find_object_debug_dump_dir, f"{base_name}_annotated.png")
+                cv2.imwrite(annotated_path, annotated_bgr)
+            if crop_bgr is not None and crop_bgr.size > 0:
+                crop_path = os.path.join(self.find_object_debug_dump_dir, f"{base_name}_crop.png")
+                cv2.imwrite(crop_path, crop_bgr)
+
+            meta_path = os.path.join(self.find_object_debug_dump_dir, f"{base_name}.json")
+            with open(meta_path, 'w', encoding='utf-8') as f:
+                json.dump(metadata or {}, f, indent=2)
+            self.get_logger().info(f"find_object debug dump saved: {meta_path}")
+        except Exception as dump_error:
+            self.get_logger().warn(f"Failed to write find_object debug dump: {dump_error}")
+
     def _build_annotated_candidates(
         self,
         frame_bgr: np.ndarray,
@@ -1164,13 +1216,31 @@ class CLIPClassifier(Node):
         float32 confidence
         """
         try:
+            req_start = time.perf_counter()
+            stage_ms: Dict[str, float] = {}
+
+            def record_stage(name: str, t0: float) -> None:
+                stage_ms[name] = round((time.perf_counter() - t0) * 1000.0, 2)
+
+            def finish_timing(mode: str, outcome: str) -> None:
+                stage_ms['total_ms'] = round((time.perf_counter() - req_start) * 1000.0, 2)
+                self._log_find_object_timing(target_label, mode, outcome, stage_ms)
+
             target_label = request.label.strip()
+            annotated_debug = None
+            selected_crop_debug = None
+            debug_meta: Dict = {
+                'label': target_label,
+                'mode': self.find_object_mode,
+                'timestamp': datetime.utcnow().isoformat() + 'Z',
+            }
 
             if not target_label:
                 response.success = False
                 response.message = "Empty label provided"
                 response.bbox = []
                 response.confidence = 0.0
+                finish_timing('none', 'empty_label')
                 return response
 
             if self.captured_frame is None:
@@ -1179,34 +1249,47 @@ class CLIPClassifier(Node):
                 response.bbox = []
                 response.confidence = 0.0
                 self.get_logger().warn("No captured frame available")
+                finish_timing('none', 'no_frame')
                 return response
+
             frame = self.captured_frame.copy()
+            detect_t0 = time.perf_counter()
             bboxes, detect_error = self._call_detect_objects()
+            record_stage('detect_ms', detect_t0)
             if detect_error:
                 response.success = False
                 response.message = detect_error
                 response.bbox = []
                 response.confidence = 0.0
+                finish_timing('detect', 'detect_error')
                 return response
             if not bboxes:
                 response.success = False
                 response.message = 'No objects detected in current frame'
                 response.bbox = []
                 response.confidence = 0.0
+                finish_timing('detect', 'no_detections')
                 return response
+            debug_meta['num_bboxes'] = len(bboxes)
 
             # VLM-first route unless mode is explicitly clip.
             use_vlm = self.find_object_mode in ('vlm', 'hybrid')
             if use_vlm:
                 try:
+                    annotate_t0 = time.perf_counter()
                     annotated, candidates = self._build_annotated_candidates(frame, bboxes)
+                    record_stage('annotate_ms', annotate_t0)
+                    annotated_debug = annotated
                     valid_ids = sorted(list(candidates.keys()))
                     if not valid_ids:
                         raise RuntimeError('No valid candidate boxes after bounds filtering')
 
+                    select_t0 = time.perf_counter()
                     select_result = self._query_vlm_select(annotated, target_label, valid_ids)
+                    record_stage('vlm_select_ms', select_t0)
                     selected_id = select_result['selected_id']
                     selection_conf = float(select_result['confidence'])
+                    debug_meta['selection'] = select_result
 
                     if selected_id is None or selected_id not in candidates:
                         raise RuntimeError('VLM did not select a valid candidate ID')
@@ -1220,14 +1303,25 @@ class CLIPClassifier(Node):
                     ]
 
                     found = None
+                    verify_ms_total = 0.0
+                    verify_records = []
                     for candidate_id in ordered_ids:
                         candidate = candidates.get(candidate_id)
                         if candidate is None:
                             continue
                         x1, y1, x2, y2 = candidate['bbox']
                         crop = frame[y1:y2, x1:x2]
+                        verify_t0 = time.perf_counter()
                         verify_result = self._query_vlm_verify_crop(crop, target_label)
+                        verify_elapsed = (time.perf_counter() - verify_t0) * 1000.0
+                        verify_ms_total += verify_elapsed
+                        verify_records.append({
+                            'candidate_id': int(candidate_id),
+                            'elapsed_ms': round(verify_elapsed, 2),
+                            'result': verify_result,
+                        })
                         if verify_result['is_match'] and verify_result['confidence'] >= self.vlm_verify_min_confidence:
+                            selected_crop_debug = crop
                             found = {
                                 'bbox': candidate['bbox'],
                                 'confidence': float(verify_result['confidence']),
@@ -1236,6 +1330,8 @@ class CLIPClassifier(Node):
                                 'reason': select_result['short_reason'] or verify_result['reason'],
                             }
                             break
+                    stage_ms['vlm_verify_ms'] = round(verify_ms_total, 2)
+                    debug_meta['verify'] = verify_records
 
                     if found is None:
                         raise RuntimeError('VLM verification rejected all selected candidates')
@@ -1258,26 +1354,56 @@ class CLIPClassifier(Node):
                         f"VLM find_object success for '{target_label}': bbox={found['bbox']}, "
                         f"confidence={found['confidence']:.3f}, id={found['region_id']}"
                     )
+                    debug_meta['found'] = found
+                    self._maybe_dump_find_object_debug(
+                        target_label=target_label,
+                        mode='vlm',
+                        outcome='success',
+                        annotated_bgr=annotated_debug,
+                        crop_bgr=selected_crop_debug,
+                        metadata=debug_meta,
+                    )
+                    finish_timing('vlm', 'success')
                     return response
 
                 except (HTTPError, URLError, TimeoutError, ValueError, RuntimeError) as vlm_error:
                     self.get_logger().warn(f"VLM find_object path failed: {vlm_error}")
+                    debug_meta['vlm_error'] = str(vlm_error)
+                    self._maybe_dump_find_object_debug(
+                        target_label=target_label,
+                        mode='vlm',
+                        outcome='failure',
+                        annotated_bgr=annotated_debug,
+                        crop_bgr=selected_crop_debug,
+                        metadata=debug_meta,
+                    )
                     if self.find_object_mode == 'vlm':
                         response.success = False
                         response.message = f"VLM find_object failed: {vlm_error}"
                         response.bbox = []
                         response.confidence = 0.0
                         self.latest_found_object = None
+                        finish_timing('vlm', 'failure')
                         return response
 
             if self.find_object_mode in ('clip', 'hybrid'):
+                clip_t0 = time.perf_counter()
                 best_match, clip_error = self._find_object_clip_fallback(target_label)
+                record_stage('clip_fallback_ms', clip_t0)
                 if best_match is None:
                     response.success = False
                     response.message = f"CLIP fallback failed: {clip_error}"
                     response.bbox = []
                     response.confidence = 0.0
                     self.latest_found_object = None
+                    debug_meta['clip_error'] = clip_error
+                    self._maybe_dump_find_object_debug(
+                        target_label=target_label,
+                        mode='clip',
+                        outcome='failure',
+                        metadata=debug_meta,
+                    )
+                    finish_timing('clip', 'failure')
                     return response
 
                 self.latest_found_object = {
@@ -1297,6 +1423,14 @@ class CLIPClassifier(Node):
                     f"CLIP fallback find_object success for '{target_label}': bbox={best_match['bbox']}, "
                     f"similarity={best_match['confidence']:.3f}, region_id={best_match['region_id']}"
                 )
+                debug_meta['found'] = best_match
+                self._maybe_dump_find_object_debug(
+                    target_label=target_label,
+                    mode='clip',
+                    outcome='success',
+                    metadata=debug_meta,
+                )
+                finish_timing('clip', 'success')
                 return response
 
             response.success = False
@@ -1304,6 +1438,7 @@ class CLIPClassifier(Node):
             response.bbox = []
             response.confidence = 0.0
             self.latest_found_object = None
+            finish_timing('none', 'unsupported_mode')
             
         except Exception as e:
             response.success = False
